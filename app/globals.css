@@ -1,0 +1,339 @@
+@import "tailwindcss";
+
+/* ---------------------------------------------------------------------------
+   Faccep design tokens.
+
+   Archetype: operator back-office. Cool app canvas, saturated brand indigo,
+   gold reserved for money figures. Dense, tactile cards over airy whitespace.
+--------------------------------------------------------------------------- */
+
+@theme {
+  --color-brand-50: #eef0ff;
+  --color-brand-100: #dfe2ff;
+  --color-brand-200: #c4c9ff;
+  --color-brand-300: #a0a6fb;
+  --color-brand-400: #7d80f4;
+  --color-brand-500: #625ee8;
+  --color-brand-600: #4f46cf;
+  --color-brand-700: #4038a8;
+  --color-brand-800: #342f85;
+  --color-brand-900: #2b2969;
+
+  --color-gold-400: #f0b429;
+  --color-gold-500: #de911d;
+  --color-gold-600: #cb6e17;
+
+  --font-sans: ui-sans-serif, system-ui, "Segoe UI", Roboto, "Helvetica Neue",
+    Arial, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "Segoe UI Mono", Menlo, monospace;
+}
+
+:root {
+  --canvas: #f4f6fa;
+  --surface: #ffffff;
+  --surface-muted: #f8fafc;
+  --border: #e2e8f0;
+  --border-strong: #cbd5e1;
+  --text: #0f172a;
+  --text-muted: #64748b;
+  --danger: #dc2626;
+  --success: #15803d;
+  --shadow-card: 0 1px 2px rgb(15 23 42 / 0.06), 0 1px 3px rgb(15 23 42 / 0.1);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --canvas: #0d1017;
+    --surface: #151923;
+    --surface-muted: #1b2130;
+    --border: #262d3d;
+    --border-strong: #36405480;
+    --text: #e7ecf5;
+    --text-muted: #94a3b8;
+    --danger: #f87171;
+    --success: #4ade80;
+    --shadow-card: 0 1px 2px rgb(0 0 0 / 0.4);
+  }
+}
+
+html,
+body {
+  background: var(--canvas);
+  color: var(--text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* --- Primitives ---------------------------------------------------------- */
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  box-shadow: var(--shadow-card);
+}
+
+.card-header {
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.card-body {
+  padding: 1.25rem;
+}
+
+.label {
+  display: block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  margin-bottom: 0.375rem;
+}
+
+.input,
+.select,
+.textarea {
+  width: 100%;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.7rem;
+  font-size: 0.875rem;
+  line-height: 1.4;
+}
+
+.input:focus,
+.select:focus,
+.textarea:focus {
+  outline: 2px solid var(--color-brand-500);
+  outline-offset: -1px;
+  border-color: transparent;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.9rem;
+  border: 1px solid transparent;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--color-brand-600);
+  color: #fff;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--color-brand-700);
+}
+
+.btn-secondary {
+  background: var(--surface);
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: var(--surface-muted);
+}
+
+.btn-danger {
+  background: transparent;
+  color: var(--danger);
+  border-color: var(--border-strong);
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+
+.btn-sm {
+  padding: 0.3rem 0.6rem;
+  font-size: 0.8125rem;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+
+.table th {
+  text-align: left;
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  font-weight: 700;
+  padding: 0.6rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.table td {
+  padding: 0.7rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+.table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.table-scroll {
+  overflow-x: auto;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  padding: 0.15rem 0.45rem;
+  border-radius: 0.35rem;
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+}
+
+.badge-brand {
+  background: color-mix(in srgb, var(--color-brand-500) 14%, transparent);
+  border-color: color-mix(in srgb, var(--color-brand-500) 30%, transparent);
+  color: var(--color-brand-600);
+}
+
+@media (prefers-color-scheme: dark) {
+  .badge-brand {
+    color: var(--color-brand-300);
+  }
+}
+
+.muted {
+  color: var(--text-muted);
+}
+
+.form-error {
+  color: var(--danger);
+  font-size: 0.8125rem;
+  font-weight: 500;
+}
+
+.empty-state {
+  padding: 2.5rem 1.25rem;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 0.875rem;
+}
+
+/* --- Printable documents -------------------------------------------------
+   Contracts, letters and proposals print on A4. Everything chrome-like is
+   dropped and the sheet is forced to light so it does not print a dark page.
+------------------------------------------------------------------------- */
+
+.doc-sheet {
+  background: #ffffff;
+  color: #111827;
+  max-width: 210mm;
+  margin: 0 auto;
+  padding: 18mm 16mm;
+  line-height: 1.6;
+  font-size: 0.9rem;
+}
+
+.doc-sheet h1 {
+  font-size: 1.25rem;
+  font-weight: 700;
+  text-align: center;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 0.25rem;
+}
+
+.doc-sheet h2 {
+  font-size: 0.95rem;
+  font-weight: 700;
+  margin: 1.25rem 0 0.4rem;
+}
+
+.doc-sheet p {
+  margin-bottom: 0.7rem;
+  text-align: justify;
+}
+
+.doc-sheet table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 0.9rem;
+  font-size: 0.85rem;
+}
+
+.doc-sheet th,
+.doc-sheet td {
+  border: 1px solid #d1d5db;
+  padding: 0.35rem 0.5rem;
+  text-align: left;
+}
+
+.doc-sheet th {
+  background: #f3f4f6;
+  font-weight: 700;
+}
+
+.doc-editable {
+  outline: 1px dashed #9ca3af;
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+.doc-editable:focus {
+  outline: 2px solid var(--color-brand-500);
+}
+
+@media print {
+  @page {
+    size: A4;
+    margin: 12mm;
+  }
+
+  body {
+    background: #ffffff !important;
+  }
+
+  .no-print {
+    display: none !important;
+  }
+
+  .doc-sheet {
+    max-width: none;
+    padding: 0;
+    font-size: 11pt;
+  }
+
+  .doc-editable {
+    outline: none !important;
+  }
+
+  .doc-page-break {
+    break-before: page;
+  }
+}

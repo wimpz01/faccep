@@ -1,0 +1,15 @@
+node_modules/
+.next/
+out/
+build/
+.env
+.env.local
+.env*.local
+next-env.d.ts
+*.tsbuildinfo
+.DS_Store
+.vercel
+.env*
+
+# Machine-local Claude Code state: approved commands, local paths.
+.claude/settings.local.json

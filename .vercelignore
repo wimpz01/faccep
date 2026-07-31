@@ -1,0 +1,8 @@
+# Never upload local secrets or tooling state.
+.env
+.env.local
+.env*.local
+node_modules
+.next
+supabase/seed
+scripts
