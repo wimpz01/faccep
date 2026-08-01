@@ -15,7 +15,12 @@ type CompanyUserRow = {
   id: string;
   is_company_admin: boolean;
   is_active: boolean;
-  profiles: { full_name: string; email: string; is_active: boolean } | null;
+  profiles: {
+    full_name: string;
+    email: string;
+    is_active: boolean;
+    locked_at: string | null;
+  } | null;
   roles: { name: string } | null;
   user_permissions: { count: number }[];
 };
@@ -32,7 +37,7 @@ export default async function UsersPage() {
     supabase
       .from("company_users")
       .select(
-        "id, is_company_admin, is_active, profiles(full_name, email, is_active), roles(name), user_permissions(count)",
+        "id, is_company_admin, is_active, profiles(full_name, email, is_active, locked_at), roles(name), user_permissions(count)",
       )
       .eq("company_id", companyId)
       .returns<CompanyUserRow[]>(),
@@ -107,7 +112,11 @@ export default async function UsersPage() {
                       {member.user_permissions?.[0]?.count ?? 0}
                     </td>
                     <td>
-                      {member.is_active && member.profiles?.is_active ? (
+                      {member.profiles?.locked_at ? (
+                        <span className="badge" style={{ color: "var(--danger)" }}>
+                          Locked
+                        </span>
+                      ) : member.is_active && member.profiles?.is_active ? (
                         <span className="badge badge-brand">Active</span>
                       ) : (
                         <span className="badge">Disabled</span>

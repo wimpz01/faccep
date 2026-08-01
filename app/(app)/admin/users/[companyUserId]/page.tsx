@@ -7,8 +7,17 @@ import { requirePermission } from "@/lib/auth";
 import { MODULE, PERMISSION_ACTIONS, can, type ModuleRow } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
 
-import { saveUserOverrides, updateCompanyUser } from "../actions";
-import { CompanyAccessForm } from "../user-forms";
+import {
+  resetUserPassword,
+  saveUserOverrides,
+  unlockUser,
+  updateCompanyUser,
+} from "../actions";
+import {
+  CompanyAccessForm,
+  ResetPasswordForm,
+  UnlockForm,
+} from "../user-forms";
 import {
   OverrideMatrix,
   type OverrideState,
@@ -23,7 +32,13 @@ type MemberRow = {
   role_id: string | null;
   is_company_admin: boolean;
   is_active: boolean;
-  profiles: { full_name: string; email: string } | null;
+  user_id: string;
+  profiles: {
+    full_name: string;
+    email: string;
+    locked_at: string | null;
+    failed_login_attempts: number;
+  } | null;
   roles: { name: string } | null;
 };
 
@@ -42,7 +57,7 @@ export default async function UserDetailPage({
   const { data: member } = await supabase
     .from("company_users")
     .select(
-      "id, company_id, role_id, is_company_admin, is_active, profiles(full_name, email), roles(name)",
+      "id, company_id, user_id, role_id, is_company_admin, is_active, profiles(full_name, email, locked_at, failed_login_attempts), roles(name)",
     )
     .eq("id", companyUserId)
     .maybeSingle<MemberRow>();
@@ -125,6 +140,45 @@ export default async function UserDetailPage({
           </Link>
         }
       />
+
+      {member.profiles?.locked_at ? (
+        <div className="mb-6">
+          <Card
+            title="Account locked"
+            description="Three wrong passwords locks an account. Only an administrator can release it."
+          >
+            {canEdit ? (
+              <UnlockForm
+                action={unlockUser}
+                userId={member.user_id}
+                companyUserId={member.id}
+                attempts={member.profiles.failed_login_attempts}
+                lockedAt={member.profiles.locked_at}
+              />
+            ) : (
+              <p className="text-sm muted">
+                Locked after {member.profiles.failed_login_attempts} failed
+                attempt(s). Unlocking needs edit rights on Users.
+              </p>
+            )}
+          </Card>
+        </div>
+      ) : null}
+
+      {canEdit ? (
+        <div className="mb-6">
+          <Card
+            title="Reset password"
+            description="There is no email delivery — set a new password and hand it over. A locked account is released at the same time."
+          >
+            <ResetPasswordForm
+              action={resetUserPassword}
+              userId={member.user_id}
+              companyUserId={member.id}
+            />
+          </Card>
+        </div>
+      ) : null}
 
       <div className="mb-6">
         <Card

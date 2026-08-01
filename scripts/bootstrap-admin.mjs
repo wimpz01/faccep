@@ -1,5 +1,5 @@
 /**
- * Creates (or promotes) the install-level super admin.
+ * Creates, promotes, or resets the install-level super admin.
  *
  *   node scripts/bootstrap-admin.mjs you@example.com [password]
  *
@@ -7,8 +7,9 @@
  * create the first company -- there is no membership row to authorise against
  * before a company exists.
  *
- * If the account already exists it is promoted in place and the password is
- * left alone.
+ * If the account already exists it is promoted in place. Passing a password
+ * also resets it and clears any lockout, which is the way back in when the
+ * only administrator is locked out of the app itself.
  */
 
 import { randomBytes } from "node:crypto";
@@ -67,11 +68,27 @@ if (existing.length === 0) {
   console.log(`Created account for ${email} (${data.user.id}).`);
 } else {
   console.log(`Account for ${email} already exists; promoting it in place.`);
+
+  // Only touch the password when one was actually supplied, so a plain
+  // promotion does not silently change how someone signs in.
+  if (providedPassword) {
+    const { error } = await admin.auth.admin.updateUserById(existing[0].id, {
+      password: providedPassword,
+    });
+    if (error) {
+      console.error(`Could not reset the password: ${error.message}`);
+      process.exit(1);
+    }
+    console.log("Password reset.");
+  }
 }
 
 await db.query(`
   update public.profiles
-     set is_super_admin = true, is_active = true
+     set is_super_admin = true,
+         is_active = true,
+         locked_at = null,
+         failed_login_attempts = 0
    where lower(email) = lower(${lit(email)});
 `);
 
@@ -86,8 +103,12 @@ console.log("\nProfile:", check[0]);
 if (created) {
   console.log(`\nInitial password: ${password}`);
   console.log("Change it after your first sign-in.");
+} else if (providedPassword) {
+  console.log("\nPassword set to the one you supplied. Any lockout is cleared.");
 } else {
-  console.log("\nPassword unchanged.");
+  console.log(
+    "\nPassword unchanged. Pass one as a second argument to reset it.",
+  );
 }
 
 await db.close();

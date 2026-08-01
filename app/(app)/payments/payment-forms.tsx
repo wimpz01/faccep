@@ -68,10 +68,57 @@ export function RecordPaymentForm({
     Object.values(applied).reduce((sum, value) => sum + (Number(value) || 0), 0),
   );
   const unapplied = round2((Number(amount) || 0) - totalApplied);
+  const selectedCount = Object.values(applied).filter(
+    (value) => Number(value) > 0,
+  ).length;
 
   /** Fills the invoices oldest-first until the payment runs out. */
   function autoApply() {
     let remaining = Number(amount) || 0;
+    const next: Record<string, string> = {};
+    for (const invoice of [...invoices].sort((a, b) =>
+      a.due_date.localeCompare(b.due_date),
+    )) {
+      if (remaining <= 0) break;
+      const take = Math.min(remaining, invoice.balance);
+      next[invoice.id] = take.toFixed(2);
+      remaining = round2(remaining - take);
+    }
+    setApplied(next);
+  }
+
+  /**
+   * Ticking an invoice attaches it, filling in whatever is still unapplied up
+   * to that invoice's balance. Unticking detaches it. The amount stays
+   * editable underneath for a part payment.
+   */
+  function toggleInvoice(invoice: OpenInvoice, checked: boolean) {
+    setApplied((current) => {
+      if (!checked) {
+        const next = { ...current };
+        delete next[invoice.id];
+        return next;
+      }
+
+      const alreadyApplied = round2(
+        Object.entries(current)
+          .filter(([id]) => id !== invoice.id)
+          .reduce((sum, [, value]) => sum + (Number(value) || 0), 0),
+      );
+      const stillUnapplied = round2((Number(amount) || 0) - alreadyApplied);
+      // With no amount entered yet, attach the full balance and let the total
+      // drive the amount instead.
+      const take =
+        stillUnapplied > 0
+          ? Math.min(stillUnapplied, invoice.balance)
+          : invoice.balance;
+
+      return { ...current, [invoice.id]: take.toFixed(2) };
+    });
+  }
+
+  function selectAll() {
+    let remaining = Number(amount) || Infinity;
     const next: Record<string, string> = {};
     for (const invoice of [...invoices].sort((a, b) =>
       a.due_date.localeCompare(b.due_date),
@@ -187,16 +234,34 @@ export function RecordPaymentForm({
         <div className="sm:col-span-3">
           <div className="flex items-center justify-between gap-3 flex-wrap mb-2">
             <p className="label" style={{ marginBottom: 0 }}>
-              Apply to invoices
+              Attach invoices — tick the ones this payment settles
             </p>
-            <button
-              type="button"
-              className="btn btn-secondary btn-sm"
-              onClick={autoApply}
-              disabled={!amount || invoices.length === 0}
-            >
-              Apply oldest first
-            </button>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={selectAll}
+                disabled={invoices.length === 0}
+              >
+                Select all
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={autoApply}
+                disabled={!amount || invoices.length === 0}
+              >
+                Apply oldest first
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => setApplied({})}
+                disabled={selectedCount === 0}
+              >
+                Clear
+              </button>
+            </div>
           </div>
 
           {invoices.length > 0 ? (
@@ -204,45 +269,82 @@ export function RecordPaymentForm({
               <table className="table">
                 <thead>
                   <tr>
+                    <th style={{ width: "3rem" }}>Attach</th>
                     <th>Invoice</th>
                     <th>Due</th>
                     <th className="text-right">Balance</th>
                     <th className="text-right" style={{ width: "10rem" }}>
-                      Apply
+                      Amount applied
                     </th>
                   </tr>
                 </thead>
                 <tbody>
-                  {invoices.map((invoice) => (
-                    <tr key={invoice.id}>
-                      <td className="text-sm">{invoice.invoice_no}</td>
-                      <td className="text-xs">{formatDate(invoice.due_date)}</td>
-                      <td className="text-right tabular-nums">
-                        {money(invoice.balance)}
-                      </td>
-                      <td className="text-right">
-                        <input
-                          name={`apply:${invoice.id}`}
-                          type="number"
-                          step="0.01"
-                          min="0"
-                          max={invoice.balance}
-                          className="input tabular-nums"
-                          style={{ textAlign: "right" }}
-                          value={applied[invoice.id] ?? ""}
-                          onChange={(event) =>
-                            setApplied((current) => ({
-                              ...current,
-                              [invoice.id]: event.currentTarget.value,
-                            }))
-                          }
-                        />
-                      </td>
-                    </tr>
-                  ))}
+                  {invoices.map((invoice) => {
+                    const value = applied[invoice.id] ?? "";
+                    const attached = Number(value) > 0;
+                    const isPartial =
+                      attached && Number(value) < invoice.balance;
+                    const overBalance = Number(value) > invoice.balance;
+                    return (
+                      <tr key={invoice.id}>
+                        <td>
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4 accent-[var(--color-brand-600)]"
+                            checked={attached}
+                            aria-label={`Attach ${invoice.invoice_no}`}
+                            onChange={(event) =>
+                              toggleInvoice(invoice, event.currentTarget.checked)
+                            }
+                          />
+                        </td>
+                        <td className="text-sm">
+                          {invoice.invoice_no}
+                          {isPartial ? (
+                            <p className="text-xs muted">part payment</p>
+                          ) : null}
+                        </td>
+                        <td className="text-xs">{formatDate(invoice.due_date)}</td>
+                        <td className="text-right tabular-nums">
+                          {money(invoice.balance)}
+                        </td>
+                        <td className="text-right">
+                          <input
+                            name={`apply:${invoice.id}`}
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            max={invoice.balance}
+                            className="input tabular-nums"
+                            style={{
+                              textAlign: "right",
+                              borderColor: overBalance
+                                ? "var(--danger)"
+                                : undefined,
+                            }}
+                            value={value}
+                            onChange={(event) =>
+                              setApplied((current) => ({
+                                ...current,
+                                [invoice.id]: event.currentTarget.value,
+                              }))
+                            }
+                          />
+                          {overBalance ? (
+                            <p
+                              className="text-xs"
+                              style={{ color: "var(--danger)" }}
+                            >
+                              more than the balance
+                            </p>
+                          ) : null}
+                        </td>
+                      </tr>
+                    );
+                  })}
                   <tr>
-                    <td colSpan={2} className="text-right font-semibold">
-                      Applied / unapplied
+                    <td colSpan={3} className="text-right font-semibold">
+                      {selectedCount} attached · applied / unapplied
                     </td>
                     <td className="text-right tabular-nums font-semibold">
                       {money(totalApplied)}
@@ -259,9 +361,18 @@ export function RecordPaymentForm({
             </div>
           ) : (
             <p className="text-sm muted">
-              This tenant has no open invoices. Record it as a prepayment.
+              This tenant has no open invoices. Record it as a prepayment, or
+              generate and release their invoice first.
             </p>
           )}
+
+          {unapplied < 0 ? (
+            <p className="form-error mt-2">
+              You have attached {money(totalApplied)} but the payment is only{" "}
+              {money(Number(amount) || 0)}. Reduce an amount or raise the
+              payment.
+            </p>
+          ) : null}
         </div>
       ) : null}
 

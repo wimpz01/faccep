@@ -65,6 +65,21 @@ function asUser(userId, sql) {
   `);
 }
 
+/**
+ * Same impersonation, but committed. Use only where the write itself is what
+ * is being verified; asUser is the default because it leaves nothing behind.
+ */
+function asUserCommitted(userId, sql) {
+  const claims = JSON.stringify({ sub: userId, role: "authenticated" });
+  return db.query(`
+    begin;
+    select set_config('request.jwt.claims', ${lit(claims)}, true);
+    set local role authenticated;
+    ${sql}
+    commit;
+  `);
+}
+
 async function perm(userId, companyId, moduleKey, action) {
   const rows = await asUser(
     userId,
@@ -1459,6 +1474,113 @@ async function main() {
   await db.query(
     `update public.accounting_periods set status = 'open', closed_at = null
       where id = ${lit(closePeriod)};`,
+  );
+
+  console.log("\nFailed-login lockout");
+
+  const lockEmail = `${TEST_TAG}-regular@example.invalid`;
+
+  check(
+    "the threshold is three attempts",
+    Number((await db.query("select public.max_login_attempts() as n;"))[0].n),
+    3,
+  );
+  check(
+    "an unlocked account reports as unlocked",
+    (await db.query(`select public.is_account_locked(${lit(lockEmail)}) as v;`))[0].v,
+    false,
+  );
+
+  const first = await db.query(
+    `select public.record_failed_login(${lit(lockEmail)}) as remaining;`,
+  );
+  check("first failure leaves two attempts", Number(first[0].remaining), 2);
+
+  const second = await db.query(
+    `select public.record_failed_login(${lit(lockEmail)}) as remaining;`,
+  );
+  check("second leaves one", Number(second[0].remaining), 1);
+
+  const third = await db.query(
+    `select public.record_failed_login(${lit(lockEmail)}) as remaining;`,
+  );
+  check("third leaves none", Number(third[0].remaining), 0);
+  check(
+    "and the account is now locked",
+    (await db.query(`select public.is_account_locked(${lit(lockEmail)}) as v;`))[0].v,
+    true,
+  );
+
+  // A locked account must not be quietly reset by a later success.
+  await db.query(`select public.clear_failed_logins(${lit(lockEmail)});`);
+  check(
+    "clearing the counter does not release a locked account",
+    (await db.query(`select public.is_account_locked(${lit(lockEmail)}) as v;`))[0].v,
+    true,
+  );
+
+  // An unknown address must not reveal itself by behaving differently.
+  check(
+    "an unknown address reports unlocked",
+    (
+      await db.query(
+        `select public.is_account_locked('nobody@example.invalid') as v;`,
+      )
+    )[0].v,
+    false,
+  );
+  check(
+    "and a failure against it returns the full allowance",
+    Number(
+      (
+        await db.query(
+          `select public.record_failed_login('nobody@example.invalid') as n;`,
+        )
+      )[0].n,
+    ),
+    3,
+  );
+
+  // Unlocking is permission-gated in the database, not just the UI.
+  const unlockBlocked = await asUser(
+    regular,
+    `select public.unlock_account(${lit(regular)});`,
+  ).then(
+    () => "allowed",
+    () => "blocked",
+  );
+  check("a user without admin.users edit cannot unlock", unlockBlocked, "blocked");
+
+  // asUser always rolls back, so this proves the permission check passes --
+  // the effect is verified separately below.
+  const unlockAllowed = await asUser(
+    companyAdmin,
+    `select public.unlock_account(${lit(regular)}); select 1 as ok;`,
+  ).then(
+    () => "allowed",
+    () => "blocked",
+  );
+  check("a company admin is allowed to unlock", unlockAllowed, "allowed");
+
+  await asUserCommitted(
+    companyAdmin,
+    `select public.unlock_account(${lit(regular)});`,
+  );
+  check(
+    "unlocking releases the account",
+    (await db.query(`select public.is_account_locked(${lit(lockEmail)}) as v;`))[0].v,
+    false,
+  );
+  check(
+    "and the attempt counter is reset",
+    Number(
+      (
+        await db.query(
+          `select failed_login_attempts as n from public.profiles where id = ${lit(regular)};`,
+        )
+      )[0].n,
+    ),
+    0,
   );
 
   console.log("\nPhase 8: CRM and documents");

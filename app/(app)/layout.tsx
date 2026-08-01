@@ -21,7 +21,11 @@ export default async function AppLayout({
   if (context.activeCompany) {
     groups.push({
       group: "Overview",
-      items: [{ href: "/dashboard", label: "Dashboard" }],
+      items: [
+        { href: "/dashboard", label: "Dashboard" },
+        // Available to everyone: it is where you change your own password.
+        { href: "/account", label: "My account" },
+      ],
     });
   }
 

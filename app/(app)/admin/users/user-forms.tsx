@@ -71,9 +71,9 @@ export function NewUserForm({
           name="password"
           type="text"
           className="input"
-          minLength={10}
+          minLength={6}
           required
-          placeholder="At least 10 characters"
+          placeholder="At least 6 characters"
         />
         <p className="text-xs muted mt-1">
           There is no email delivery — hand this to the user directly and have
@@ -95,7 +95,22 @@ export function NewUserForm({
         </select>
       </div>
 
-      <div className="sm:col-span-2">
+      <div>
+        <label className="label" htmlFor="new-user-status">
+          Status
+        </label>
+        <select
+          id="new-user-status"
+          name="status"
+          className="select"
+          defaultValue="active"
+        >
+          <option value="active">Active — can sign in and work</option>
+          <option value="inactive">Inactive — created, cannot sign in yet</option>
+        </select>
+      </div>
+
+      <div className="sm:col-span-2 flex items-end pb-1">
         <label className="flex items-center gap-2 text-sm">
           <input
             type="checkbox"
@@ -109,6 +124,78 @@ export function NewUserForm({
 
       <div className="sm:col-span-2 flex items-center gap-3 flex-wrap">
         <Submit label="Create user" />
+        <Result state={state} />
+      </div>
+    </form>
+  );
+}
+
+export function UnlockForm({
+  action,
+  userId,
+  companyUserId,
+  attempts,
+  lockedAt,
+}: {
+  action: (state: ActionState, formData: FormData) => Promise<ActionState>;
+  userId: string;
+  companyUserId: string;
+  attempts: number;
+  lockedAt: string;
+}) {
+  const [state, formAction] = useActionState<ActionState, FormData>(action, {});
+
+  return (
+    <form action={formAction} className="flex flex-col gap-3">
+      <p className="text-sm">
+        Locked on {new Date(lockedAt).toLocaleString("en-PH")} after {attempts}{" "}
+        failed sign-in attempt{attempts === 1 ? "" : "s"}. They cannot sign in,
+        and any session they still held has stopped working.
+      </p>
+      <input type="hidden" name="user_id" value={userId} />
+      <input type="hidden" name="companyUserId" value={companyUserId} />
+      <div className="flex items-center gap-3 flex-wrap">
+        <Submit label="Unlock account" />
+        <Result state={state} />
+      </div>
+    </form>
+  );
+}
+
+export function ResetPasswordForm({
+  action,
+  userId,
+  companyUserId,
+}: {
+  action: (state: ActionState, formData: FormData) => Promise<ActionState>;
+  userId: string;
+  companyUserId: string;
+}) {
+  const [state, formAction] = useActionState<ActionState, FormData>(action, {});
+
+  return (
+    <form action={formAction} className="grid gap-4 sm:grid-cols-3">
+      <input type="hidden" name="user_id" value={userId} />
+      <input type="hidden" name="companyUserId" value={companyUserId} />
+      <div>
+        <label className="label" htmlFor="reset-password">
+          New password *
+        </label>
+        <input
+          id="reset-password"
+          name="password"
+          type="text"
+          minLength={6}
+          className="input"
+          required
+          placeholder="At least 6 characters"
+        />
+        <p className="text-xs muted mt-1">
+          Shown as plain text so you can read it out. Hand it over directly.
+        </p>
+      </div>
+      <div className="sm:col-span-2 flex items-end gap-3 flex-wrap pb-1">
+        <Submit label="Reset password" />
         <Result state={state} />
       </div>
     </form>
@@ -155,7 +242,26 @@ export function CompanyAccessForm({
         </select>
       </div>
 
-      <div className="flex flex-col justify-end gap-2">
+      <div>
+        <label className="label" htmlFor={`status-${companyUserId}`}>
+          Status
+        </label>
+        <select
+          id={`status-${companyUserId}`}
+          name="status"
+          className="select"
+          defaultValue={isActive ? "active" : "inactive"}
+        >
+          <option value="active">Active — can sign in and work</option>
+          <option value="inactive">Inactive — cannot sign in</option>
+        </select>
+        <p className="text-xs muted mt-1">
+          Inactive is deliberate and permanent until changed. A lockout is
+          separate and comes from failed sign-ins.
+        </p>
+      </div>
+
+      <div className="flex items-end pb-1">
         <label className="flex items-center gap-2 text-sm">
           <input
             type="checkbox"
@@ -164,15 +270,6 @@ export function CompanyAccessForm({
             className="h-4 w-4 accent-[var(--color-brand-600)]"
           />
           Company admin
-        </label>
-        <label className="flex items-center gap-2 text-sm">
-          <input
-            type="checkbox"
-            name="is_active"
-            defaultChecked={isActive}
-            className="h-4 w-4 accent-[var(--color-brand-600)]"
-          />
-          Access active
         </label>
       </div>
 

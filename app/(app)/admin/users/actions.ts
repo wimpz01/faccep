@@ -16,9 +16,10 @@ const newUserSchema = z.object({
   full_name: z.string().trim().min(2, "Full name is required."),
   password: z
     .string()
-    .min(10, "Use at least 10 characters for the initial password."),
+    .min(6, "Use at least 6 characters for the initial password."),
   role_id: z.string().uuid().optional().or(z.literal("")),
   is_company_admin: z.boolean(),
+  status: z.enum(["active", "inactive"]),
 });
 
 /**
@@ -46,10 +47,12 @@ export async function createUser(
     password: formData.get("password"),
     role_id: formData.get("role_id"),
     is_company_admin: formData.get("is_company_admin") === "on",
+    status: formData.get("status") || "active",
   });
   if (!parsed.success) return { error: parsed.error.issues[0].message };
 
-  const { email, full_name, password, role_id, is_company_admin } = parsed.data;
+  const { email, full_name, password, role_id, is_company_admin, status } =
+    parsed.data;
 
   let admin;
   try {
@@ -98,6 +101,7 @@ export async function createUser(
       user_id: userId,
       role_id: role_id || null,
       is_company_admin,
+      is_active: status === "active",
     })
     .select("id")
     .single();
@@ -117,9 +121,15 @@ export async function createUser(
     entityTable: "company_users",
     entityId: membership.id,
     summary: createdAccount
-      ? `Created user ${email} and granted access.`
-      : `Granted existing user ${email} access to this company.`,
-    after: { email, full_name, role_id: role_id || null, is_company_admin },
+      ? `Created user ${email} (${status}) and granted access.`
+      : `Granted existing user ${email} access to this company (${status}).`,
+    after: {
+      email,
+      full_name,
+      role_id: role_id || null,
+      is_company_admin,
+      status,
+    },
   });
 
   revalidatePath("/admin/users");
@@ -143,7 +153,11 @@ export async function updateCompanyUser(
   const companyUserId = String(formData.get("companyUserId") ?? "");
   const roleId = String(formData.get("role_id") ?? "");
   const isCompanyAdmin = formData.get("is_company_admin") === "on";
-  const isActive = formData.get("is_active") === "on";
+  const status = String(formData.get("status") ?? "active");
+  if (status !== "active" && status !== "inactive") {
+    return { error: "Status must be active or inactive." };
+  }
+  const isActive = status === "active";
 
   const supabase = await createClient();
 
@@ -280,6 +294,110 @@ export async function saveUserOverrides(
       rows.size === 0
         ? "All overrides cleared — this user now follows their role exactly."
         : `Saved ${rows.size} override${rows.size === 1 ? "" : "s"}.`,
+  };
+}
+
+/**
+ * Releases an account locked by failed sign-ins.
+ *
+ * The permission check lives in unlock_account() in the database, so the rule
+ * holds even if this is reached another way.
+ */
+export async function unlockUser(
+  _prevState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  try {
+    await assertPermission(MODULE.adminUsers, "edit");
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+
+  const userId = String(formData.get("user_id") ?? "");
+  if (!userId) return { error: "Missing user." };
+
+  const supabase = await createClient();
+  const { data: profile } = await supabase
+    .from("profiles")
+    .select("email, failed_login_attempts")
+    .eq("id", userId)
+    .maybeSingle();
+
+  const { error } = await supabase.rpc("unlock_account", { p_user: userId });
+  if (error) return { error: error.message };
+
+  await logAudit({
+    action: "update",
+    moduleKey: MODULE.adminUsers,
+    entityTable: "profiles",
+    entityId: userId,
+    summary: `Unlocked ${profile?.email ?? userId} after ${profile?.failed_login_attempts ?? 0} failed sign-in attempt(s).`,
+    before: { locked: true },
+    after: { locked: false },
+  });
+
+  revalidatePath("/admin/users");
+  revalidatePath(`/admin/users/${formData.get("companyUserId") ?? ""}`);
+  return { success: "Account unlocked. They can sign in again." };
+}
+
+/**
+ * Sets another user's password.
+ *
+ * There is no email delivery, so an administrator sets a new one and hands it
+ * over, exactly as at account creation. Unlocks the account at the same time,
+ * since a forgotten password is the usual reason it locked.
+ */
+export async function resetUserPassword(
+  _prevState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  try {
+    await assertPermission(MODULE.adminUsers, "edit");
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+
+  const userId = String(formData.get("user_id") ?? "");
+  const password = String(formData.get("password") ?? "");
+  if (!userId) return { error: "Missing user." };
+  if (password.length < 6) return { error: "Use at least 6 characters." };
+
+  let admin;
+  try {
+    admin = createAdminClient();
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+
+  const { error } = await admin.auth.admin.updateUserById(userId, { password });
+  if (error) return { error: error.message };
+
+  const supabase = await createClient();
+  const { data: profile } = await supabase
+    .from("profiles")
+    .select("email, locked_at")
+    .eq("id", userId)
+    .maybeSingle();
+
+  if (profile?.locked_at) {
+    await supabase.rpc("unlock_account", { p_user: userId });
+  }
+
+  await logAudit({
+    action: "update",
+    moduleKey: MODULE.adminUsers,
+    entityTable: "auth.users",
+    entityId: userId,
+    summary:
+      `Reset the password for ${profile?.email ?? userId}` +
+      (profile?.locked_at ? " and unlocked the account." : "."),
+  });
+
+  revalidatePath(`/admin/users/${formData.get("companyUserId") ?? ""}`);
+  revalidatePath("/admin/users");
+  return {
+    success: "Password reset. Hand it to them directly and have them change it.",
   };
 }
 

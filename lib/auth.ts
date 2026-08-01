@@ -68,13 +68,14 @@ export const getSessionContext = cache(
 
     const { data: profile } = await supabase
       .from("profiles")
-      .select("full_name, email, is_super_admin, is_active")
+      .select("full_name, email, is_super_admin, is_active, locked_at")
       .eq("id", user.id)
       .maybeSingle();
 
-    // A profile row is created by trigger on signup; a disabled account is
-    // treated as signed out.
-    if (!profile || !profile.is_active) return null;
+    // A profile row is created by trigger on signup. A disabled account, or
+    // one locked out by failed sign-ins, is treated as signed out -- so
+    // locking someone also ends the session they already hold.
+    if (!profile || !profile.is_active || profile.locked_at) return null;
 
     const { data: membershipRows } = await supabase
       .from("company_users")
