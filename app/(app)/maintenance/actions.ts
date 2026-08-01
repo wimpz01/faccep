@@ -56,23 +56,10 @@ export async function createJob(
 
   const supabase = await createClient();
 
-  const year = new Date().getFullYear();
-  const prefix = `JOB-${year}-`;
-  const { data: last } = await supabase
-    .from("maintenance_jobs")
-    .select("job_no")
-    .eq("company_id", companyId)
-    .ilike("job_no", `${prefix}%`)
-    .order("job_no", { ascending: false })
-    .limit(1);
-  const sequence = last?.[0] ? Number(last[0].job_no.slice(prefix.length)) + 1 : 1;
-  const jobNo = `${prefix}${String(Number.isFinite(sequence) ? sequence : 1).padStart(4, "0")}`;
-
   const { data, error } = await supabase
     .from("maintenance_jobs")
     .insert({
       company_id: companyId,
-      job_no: jobNo,
       title: parsed.data.title,
       description: parsed.data.description || null,
       location_id: parsed.data.location_id || null,
@@ -83,7 +70,7 @@ export async function createJob(
       scheduled_for: parsed.data.scheduled_for || null,
       contract_amount: parsed.data.contract_amount,
     })
-    .select("id")
+    .select("id, job_no")
     .single();
 
   if (error) return { error: error.message };
@@ -93,7 +80,7 @@ export async function createJob(
     moduleKey: MODULE.maintenanceRepairs,
     entityTable: "maintenance_jobs",
     entityId: data.id,
-    summary: `Reported job ${jobNo}: ${parsed.data.title}`,
+    summary: `Reported job ${data.job_no}: ${parsed.data.title}`,
     after: parsed.data,
   });
 
@@ -225,29 +212,14 @@ export async function createMaterialRequest(
 
   const supabase = await createClient();
 
-  const year = new Date().getFullYear();
-  const prefix = `MR-${year}-`;
-  const { data: last } = await supabase
-    .from("material_requests")
-    .select("request_no")
-    .eq("company_id", companyId)
-    .ilike("request_no", `${prefix}%`)
-    .order("request_no", { ascending: false })
-    .limit(1);
-  const sequence = last?.[0]
-    ? Number(last[0].request_no.slice(prefix.length)) + 1
-    : 1;
-  const requestNo = `${prefix}${String(Number.isFinite(sequence) ? sequence : 1).padStart(4, "0")}`;
-
   const { data: request, error } = await supabase
     .from("material_requests")
     .insert({
       company_id: companyId,
       job_id: jobId || null,
-      request_no: requestNo,
       requested_by: userId,
     })
-    .select("id")
+    .select("id, request_no")
     .single();
 
   if (error) return { error: error.message };
@@ -262,12 +234,12 @@ export async function createMaterialRequest(
     moduleKey: MODULE.maintenanceMaterialRequests,
     entityTable: "material_requests",
     entityId: request.id,
-    summary: `Raised material request ${requestNo} with ${lines.length} item(s).`,
+    summary: `Raised material request ${request.request_no} with ${lines.length} item(s).`,
     after: { lines },
   });
 
   revalidatePath(`/maintenance/jobs/${jobId}`);
-  return { success: `${requestNo} raised.` };
+  return { success: `${request.request_no} raised.` };
 }
 
 /** Issuing takes the stock out; the checklist then tracks what was used. */

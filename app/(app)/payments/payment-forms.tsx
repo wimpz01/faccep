@@ -57,7 +57,14 @@ export function RecordPaymentForm({
   const [tenantId, setTenantId] = useState("");
   const [amount, setAmount] = useState("");
   const [kind, setKind] = useState("payment");
+  const [mode, setMode] = useState("cash");
+  const [postdated, setPostdated] = useState(false);
   const [applied, setApplied] = useState<Record<string, string>>({});
+
+  const isCheque = mode === "check";
+  // A postdated cheque is a promise, not cash. It is tracked against the
+  // tenant until it clears, so it settles nothing on the way in.
+  const isPostdated = isCheque && postdated;
 
   const invoices = useMemo(
     () => openInvoices.filter((invoice) => invoice.tenant_id === tenantId),
@@ -210,7 +217,17 @@ export function RecordPaymentForm({
         <label className="label" htmlFor="payment_mode">
           Mode *
         </label>
-        <select id="payment_mode" name="payment_mode" className="select" defaultValue="cash">
+        <select
+          id="payment_mode"
+          name="payment_mode"
+          className="select"
+          value={mode}
+          onChange={(event) => {
+            const next = event.currentTarget.value;
+            setMode(next);
+            if (next !== "check") setPostdated(false);
+          }}
+        >
           <option value="cash">Cash</option>
           <option value="gcash">GCash</option>
           <option value="check">Cheque</option>
@@ -220,17 +237,71 @@ export function RecordPaymentForm({
 
       <div>
         <label className="label" htmlFor="reference">
-          Reference
+          {isCheque ? "Cheque number *" : "Reference"}
         </label>
         <input
           id="reference"
           name="reference"
           className="input"
-          placeholder="Cheque no., GCash ref."
+          required={isCheque}
+          placeholder={isCheque ? "000123456" : "GCash ref., transfer no."}
         />
       </div>
 
-      {tenantId ? (
+      {isCheque ? (
+        <>
+          <div>
+            <label className="label" htmlFor="check_bank">
+              Bank *
+            </label>
+            <input id="check_bank" name="check_bank" className="input" required />
+          </div>
+
+          <div>
+            <label className="label" htmlFor="check_date">
+              Cheque date *
+            </label>
+            <input
+              id="check_date"
+              name="check_date"
+              type="date"
+              className="input"
+              required
+            />
+            <p className="text-xs muted mt-1">The date written on the cheque.</p>
+          </div>
+
+          <div>
+            <p className="label">Postdated</p>
+            <label
+              className="flex items-start gap-2 text-sm"
+              style={{ cursor: "pointer", paddingTop: "0.5rem" }}
+            >
+              <input
+                type="checkbox"
+                name="postdated"
+                className="h-4 w-4 accent-[var(--color-brand-600)]"
+                style={{ marginTop: "0.15rem" }}
+                checked={postdated}
+                onChange={(event) => setPostdated(event.currentTarget.checked)}
+              />
+              <span>Not yet deposited</span>
+            </label>
+          </div>
+        </>
+      ) : null}
+
+      {isPostdated ? (
+        <div className="sm:col-span-3">
+          <p className="text-sm" style={{ color: "var(--color-brand-600)" }}>
+            This will be held under <strong>Postdated cheques</strong> rather than
+            posted as a collection. It settles no invoice and adds nothing to
+            this month&rsquo;s takings until it is deposited and cleared.
+          </p>
+        </div>
+      ) : null}
+
+      {tenantId && !isPostdated ? (
         <div className="sm:col-span-3">
           <div className="flex items-center justify-between gap-3 flex-wrap mb-2">
             <p className="label" style={{ marginBottom: 0 }}>
@@ -323,12 +394,15 @@ export function RecordPaymentForm({
                                 : undefined,
                             }}
                             value={value}
-                            onChange={(event) =>
+                            onChange={(event) => {
+                              // currentTarget is null by the time the updater
+                              // runs, so take the value now.
+                              const value = event.currentTarget.value;
                               setApplied((current) => ({
                                 ...current,
-                                [invoice.id]: event.currentTarget.value,
-                              }))
-                            }
+                                [invoice.id]: value,
+                              }));
+                            }}
                           />
                           {overBalance ? (
                             <p
@@ -384,7 +458,7 @@ export function RecordPaymentForm({
       </div>
 
       <div className="sm:col-span-3 flex items-center gap-3 flex-wrap">
-        <Submit label="Record payment" />
+        <Submit label={isPostdated ? "Record postdated cheque" : "Record payment"} />
         <Result state={state} />
       </div>
     </form>
@@ -456,6 +530,9 @@ export function PdcForm({
           Cheque number *
         </label>
         <input id="pdc_check_no" name="check_no" className="input" required />
+        <p className="text-xs muted mt-1">
+          As printed by the bank. Ours is issued on save.
+        </p>
       </div>
       <div>
         <label className="label" htmlFor="pdc_amount">

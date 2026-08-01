@@ -18,6 +18,7 @@ type CompanyUserRow = {
   profiles: {
     full_name: string;
     email: string;
+    user_code: string;
     is_active: boolean;
     locked_at: string | null;
   } | null;
@@ -37,7 +38,7 @@ export default async function UsersPage() {
     supabase
       .from("company_users")
       .select(
-        "id, is_company_admin, is_active, profiles(full_name, email, is_active, locked_at), roles(name), user_permissions(count)",
+        "id, is_company_admin, is_active, profiles(full_name, email, user_code, is_active, locked_at), roles(name), user_permissions(count)",
       )
       .eq("company_id", companyId)
       .returns<CompanyUserRow[]>(),
@@ -77,6 +78,7 @@ export default async function UsersPage() {
             <table className="table">
               <thead>
                 <tr>
+                  <th>User code</th>
                   <th>Name</th>
                   <th>Role</th>
                   <th>Overrides</th>
@@ -90,11 +92,16 @@ export default async function UsersPage() {
                     <td>
                       <Link
                         href={`/admin/users/${member.id}`}
-                        className="font-semibold"
+                        className="font-semibold tabular-nums"
                         style={{ color: "var(--color-brand-600)" }}
                       >
-                        {member.profiles?.full_name || "Unnamed user"}
+                        {member.profiles?.user_code}
                       </Link>
+                    </td>
+                    <td>
+                      <span className="text-sm">
+                        {member.profiles?.full_name || "Unnamed user"}
+                      </span>
                       <p className="text-xs muted break-all">
                         {member.profiles?.email}
                       </p>

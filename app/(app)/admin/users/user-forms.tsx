@@ -50,6 +50,27 @@ export function NewUserForm({
       </div>
 
       <div>
+        <label className="label" htmlFor="new-user-code">
+          User code *
+        </label>
+        <input
+          id="new-user-code"
+          name="user_code"
+          className="input"
+          required
+          minLength={3}
+          maxLength={20}
+          placeholder="CASHIER01"
+          autoCapitalize="characters"
+          spellCheck={false}
+          style={{ textTransform: "uppercase" }}
+        />
+        <p className="text-xs muted mt-1">
+          What they type to sign in. Must be unique across the whole system.
+        </p>
+      </div>
+
+      <div>
         <label className="label" htmlFor="new-user-email">
           Email *
         </label>
@@ -60,6 +81,9 @@ export function NewUserForm({
           className="input"
           required
         />
+        <p className="text-xs muted mt-1">
+          The account identity behind the code. Never used to sign in.
+        </p>
       </div>
 
       <div>
@@ -124,6 +148,51 @@ export function NewUserForm({
 
       <div className="sm:col-span-2 flex items-center gap-3 flex-wrap">
         <Submit label="Create user" />
+        <Result state={state} />
+      </div>
+    </form>
+  );
+}
+
+export function UserCodeForm({
+  action,
+  userId,
+  companyUserId,
+  currentCode,
+}: {
+  action: (state: ActionState, formData: FormData) => Promise<ActionState>;
+  userId: string;
+  companyUserId: string;
+  currentCode: string;
+}) {
+  const [state, formAction] = useActionState<ActionState, FormData>(action, {});
+
+  return (
+    <form action={formAction} className="grid gap-4 sm:grid-cols-3">
+      <input type="hidden" name="user_id" value={userId} />
+      <input type="hidden" name="companyUserId" value={companyUserId} />
+      <div>
+        <label className="label" htmlFor="edit-user-code">
+          User code *
+        </label>
+        <input
+          id="edit-user-code"
+          name="user_code"
+          className="input"
+          required
+          minLength={3}
+          maxLength={20}
+          defaultValue={currentCode}
+          autoCapitalize="characters"
+          spellCheck={false}
+          style={{ textTransform: "uppercase" }}
+        />
+        <p className="text-xs muted mt-1">
+          Changing this changes how they sign in everywhere. Tell them.
+        </p>
+      </div>
+      <div className="sm:col-span-2 flex items-end gap-3 flex-wrap pb-1">
+        <Submit label="Save code" />
         <Result state={state} />
       </div>
     </form>

@@ -11,20 +11,6 @@ import { createClient } from "@/lib/supabase/server";
 
 export type ActionState = { error?: string; success?: string };
 
-async function nextNumber(companyId: string, table: string, column: string, prefix: string) {
-  const supabase = await createClient();
-  const { data } = await supabase
-    .from(table)
-    .select(column)
-    .eq("company_id", companyId)
-    .ilike(column, `${prefix}%`)
-    .order(column, { ascending: false })
-    .limit(1);
-  const last = (data?.[0] as Record<string, string> | undefined)?.[column];
-  const next = last ? Number(last.slice(prefix.length)) + 1 : 1;
-  return `${prefix}${String(Number.isFinite(next) ? next : 1).padStart(4, "0")}`;
-}
-
 const inquirySchema = z.object({
   contact_person: z.string().trim().min(2, "Who got in touch?"),
   company_name: z.string().trim().optional().or(z.literal("")),
@@ -65,18 +51,11 @@ export async function createInquiry(
   if (!parsed.success) return { error: parsed.error.issues[0].message };
 
   const supabase = await createClient();
-  const inquiryNo = await nextNumber(
-    companyId,
-    "inquiries",
-    "inquiry_no",
-    `INQ-${new Date().getFullYear()}-`,
-  );
 
   const { data, error } = await supabase
     .from("inquiries")
     .insert({
       company_id: companyId,
-      inquiry_no: inquiryNo,
       contact_person: parsed.data.contact_person,
       company_name: parsed.data.company_name || null,
       mobile_number: parsed.data.mobile_number || null,
@@ -92,7 +71,7 @@ export async function createInquiry(
         ? Number(parsed.data.proposed_term_years)
         : null,
     })
-    .select("id")
+    .select("id, inquiry_no")
     .single();
 
   if (error) return { error: error.message };
@@ -102,7 +81,7 @@ export async function createInquiry(
     moduleKey: MODULE.crmInquiries,
     entityTable: "inquiries",
     entityId: data.id,
-    summary: `Logged inquiry ${inquiryNo} from ${parsed.data.contact_person}.`,
+    summary: `Logged inquiry ${data.inquiry_no} from ${parsed.data.contact_person}.`,
     after: parsed.data,
   });
 
@@ -179,24 +158,17 @@ export async function createComplaint(
   if (subject.length < 3) return { error: "Give the complaint a subject." };
 
   const supabase = await createClient();
-  const complaintNo = await nextNumber(
-    companyId,
-    "complaints",
-    "complaint_no",
-    `CMP-${new Date().getFullYear()}-`,
-  );
 
   const { data, error } = await supabase
     .from("complaints")
     .insert({
       company_id: companyId,
-      complaint_no: complaintNo,
       subject,
       details: String(formData.get("details") ?? "").trim() || null,
       tenant_id: String(formData.get("tenant_id") ?? "") || null,
       unit_id: String(formData.get("unit_id") ?? "") || null,
     })
-    .select("id")
+    .select("id, complaint_no")
     .single();
 
   if (error) return { error: error.message };
@@ -206,11 +178,11 @@ export async function createComplaint(
     moduleKey: MODULE.crmComplaints,
     entityTable: "complaints",
     entityId: data.id,
-    summary: `Logged complaint ${complaintNo}: ${subject}`,
+    summary: `Logged complaint ${data.complaint_no}: ${subject}`,
   });
 
   revalidatePath("/crm/complaints");
-  return { success: `${complaintNo} logged.` };
+  return { success: `${data.complaint_no} logged.` };
 }
 
 export async function updateComplaint(

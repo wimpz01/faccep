@@ -187,6 +187,7 @@ export default async function AppLayout({
         activeCompanyId={context.activeCompany?.companyId ?? ""}
         userName={context.fullName}
         userEmail={context.email}
+        userCode={context.userCode}
         roleName={
           context.isSuperAdmin
             ? "Super admin"

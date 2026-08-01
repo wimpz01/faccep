@@ -13,21 +13,6 @@ import { createClient } from "@/lib/supabase/server";
 
 export type ActionState = { error?: string; success?: string };
 
-async function nextNumber(companyId: string, table: string, column: string, prefix: string) {
-  const supabase = await createClient();
-  const { data } = await supabase
-    .from(table)
-    .select(column)
-    .eq("company_id", companyId)
-    .ilike(column, `${prefix}%`)
-    .order(column, { ascending: false })
-    .limit(1);
-
-  const last = (data?.[0] as Record<string, string> | undefined)?.[column];
-  const next = last ? Number(last.slice(prefix.length)) + 1 : 1;
-  return `${prefix}${String(Number.isFinite(next) ? next : 1).padStart(4, "0")}`;
-}
-
 // ---------------------------------------------------------------------------
 // Vendors
 // ---------------------------------------------------------------------------
@@ -158,24 +143,17 @@ export async function createPurchaseRequest(
   if (lines.length === 0) return { error: "Add at least one line with a quantity." };
 
   const supabase = await createClient();
-  const requestNo = await nextNumber(
-    companyId,
-    "purchase_requests",
-    "request_no",
-    `PR-${new Date().getFullYear()}-`,
-  );
 
   const { data: request, error } = await supabase
     .from("purchase_requests")
     .insert({
       company_id: companyId,
-      request_no: requestNo,
       job_id: String(formData.get("job_id") ?? "") || null,
       needed_by: String(formData.get("needed_by") ?? "") || null,
       justification: String(formData.get("justification") ?? "").trim() || null,
       requested_by: userId,
     })
-    .select("id")
+    .select("id, request_no")
     .single();
 
   if (error) return { error: error.message };
@@ -197,12 +175,12 @@ export async function createPurchaseRequest(
     moduleKey: MODULE.purchasingRequests,
     entityTable: "purchase_requests",
     entityId: request.id,
-    summary: `Raised purchase request ${requestNo} with ${lines.length} line(s).`,
+    summary: `Raised purchase request ${request.request_no} with ${lines.length} line(s).`,
     after: { lines },
   });
 
   revalidatePath("/purchasing/requests");
-  return { success: `${requestNo} raised. Submit it for approval when ready.` };
+  return { success: `${request.request_no} raised. Submit it for approval when ready.` };
 }
 
 /** Submitting routes it through the shared approval queue (spec 10). */
@@ -284,24 +262,16 @@ export async function createPurchaseOrder(
   const lines = readLines(formData);
   if (lines.length === 0) return { error: "Add at least one line." };
 
-  const poNo = await nextNumber(
-    companyId,
-    "purchase_orders",
-    "po_no",
-    `PO-${new Date().getFullYear()}-`,
-  );
-
   const { data: order, error } = await supabase
     .from("purchase_orders")
     .insert({
       company_id: companyId,
       vendor_id: vendorId,
       request_id: requestId || null,
-      po_no: poNo,
       expected_date: String(formData.get("expected_date") ?? "") || null,
       notes: String(formData.get("notes") ?? "").trim() || null,
     })
-    .select("id")
+    .select("id, po_no")
     .single();
 
   if (error) return { error: error.message };
@@ -331,7 +301,7 @@ export async function createPurchaseOrder(
     moduleKey: MODULE.purchasingOrders,
     entityTable: "purchase_orders",
     entityId: order.id,
-    summary: `Created purchase order ${poNo}.`,
+    summary: `Created purchase order ${order.po_no}.`,
     after: { lines },
   });
 
@@ -424,23 +394,15 @@ export async function receiveGoods(
 
   if (received.length === 0) return { error: "Enter at least one received quantity." };
 
-  const receiptNo = await nextNumber(
-    companyId,
-    "goods_receipts",
-    "receipt_no",
-    `GR-${new Date().getFullYear()}-`,
-  );
-
   const { data: receipt, error } = await supabase
     .from("goods_receipts")
     .insert({
       company_id: companyId,
       po_id: poId,
-      receipt_no: receiptNo,
       received_by: userId,
       notes: String(formData.get("notes") ?? "").trim() || null,
     })
-    .select("id")
+    .select("id, receipt_no")
     .single();
 
   if (error) return { error: error.message };
@@ -455,11 +417,11 @@ export async function receiveGoods(
     moduleKey: MODULE.purchasingReceiving,
     entityTable: "goods_receipts",
     entityId: receipt.id,
-    summary: `Received ${received.length} line(s) on ${order.po_no} as ${receiptNo}.`,
+    summary: `Received ${received.length} line(s) on ${order.po_no} as ${receipt.receipt_no}.`,
     after: { received },
   });
 
   revalidatePath(`/purchasing/orders/${poId}`);
   revalidatePath("/inventory");
-  return { success: `${receiptNo} recorded. Stock has been updated.` };
+  return { success: `${receipt.receipt_no} recorded. Stock has been updated.` };
 }

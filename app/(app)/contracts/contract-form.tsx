@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useActionState, useMemo, useState } from "react";
 import { useFormStatus } from "react-dom";
 
@@ -135,6 +136,7 @@ export function ContractForm({
   contract,
   submitLabel,
   lockTenant = false,
+  returnTo,
 }: {
   action: (state: ActionState, formData: FormData) => Promise<ActionState>;
   tenants: TenantOption[];
@@ -142,6 +144,8 @@ export function ContractForm({
   contract?: ContractValues;
   submitLabel: string;
   lockTenant?: boolean;
+  /** Where to land after saving. Lets the same form serve the tenant set-up. */
+  returnTo?: string;
 }) {
   const [state, formAction] = useActionState<ActionState, FormData>(action, {});
 
@@ -208,6 +212,7 @@ export function ContractForm({
   return (
     <form action={formAction} className="flex flex-col gap-5">
       {contract?.id ? <input type="hidden" name="id" value={contract.id} /> : null}
+      {returnTo ? <input type="hidden" name="return_to" value={returnTo} /> : null}
 
       <section className="card">
         <div className="card-header">
@@ -245,16 +250,14 @@ export function ContractForm({
           </div>
 
           <div>
-            <label className="label" htmlFor="contract_no">
-              Contract number *
-            </label>
-            <input
-              id="contract_no"
-              name="contract_no"
-              className="input"
-              required
-              defaultValue={contract?.contract_no ?? ""}
-            />
+            <p className="label">Contract number</p>
+            {contract?.contract_no ? (
+              <p className="text-sm font-semibold tabular-nums pt-2">
+                {contract.contract_no}
+              </p>
+            ) : (
+              <p className="text-sm muted pt-2">Issued on save.</p>
+            )}
           </div>
 
           <div>
@@ -367,13 +370,17 @@ export function ContractForm({
                           value={unit.id}
                           checked={checked}
                           className="h-3.5 w-3.5 accent-[var(--color-brand-600)] mr-1"
-                          onChange={(event) =>
+                          onChange={(event) => {
+                            // Read before the setter: React nulls
+                            // currentTarget once the handler returns, and the
+                            // updater runs later during batching.
+                            const checked = event.currentTarget.checked;
                             setSelectedUnits((current) =>
-                              event.currentTarget.checked
+                              checked
                                 ? [...current, unit.id]
                                 : current.filter((id) => id !== unit.id),
-                            )
-                          }
+                            );
+                          }}
                         />
                         {unit.code} · {money(unit.monthly_rate)}
                         {unit.status === "occupied" && !checked ? " (occupied)" : ""}
@@ -603,6 +610,19 @@ export function ContractForm({
                 : ""
             }
           />
+          <p className="text-xs muted">
+            On <strong>consumption</strong>, the rate is not set here — it comes
+            from the provider&rsquo;s actual bill each month. Enter that bill and
+            the meter readings under{" "}
+            <Link
+              href="/billing/periods"
+              style={{ color: "var(--color-brand-600)" }}
+            >
+              Billing → Utility periods
+            </Link>
+            , where the charge is distributed across the metered units and the
+            unrecovered balance is shown.
+          </p>
         </div>
       </section>
 

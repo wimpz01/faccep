@@ -25,6 +25,7 @@ export type Membership = {
 export type SessionContext = {
   userId: string;
   email: string;
+  userCode: string;
   fullName: string;
   isSuperAdmin: boolean;
   memberships: Membership[];
@@ -68,7 +69,7 @@ export const getSessionContext = cache(
 
     const { data: profile } = await supabase
       .from("profiles")
-      .select("full_name, email, is_super_admin, is_active, locked_at")
+      .select("full_name, email, user_code, is_super_admin, is_active, locked_at")
       .eq("id", user.id)
       .maybeSingle();
 
@@ -147,6 +148,7 @@ export const getSessionContext = cache(
     return {
       userId: user.id,
       email: profile.email ?? user.email ?? "",
+      userCode: profile.user_code ?? "",
       fullName: profile.full_name || (profile.email ?? ""),
       isSuperAdmin: profile.is_super_admin,
       memberships,

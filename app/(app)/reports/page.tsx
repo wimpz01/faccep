@@ -27,6 +27,13 @@ const REPORTS: {
     moduleKey: MODULE.reportsReceivables,
   },
   {
+    href: "/payments/pdc/deposit-slip",
+    title: "Cheque deposit slip",
+    description:
+      "Matured, undeposited cheques grouped by bank, ready to print and hand over the counter.",
+    moduleKey: MODULE.paymentsPdc,
+  },
+  {
     href: "/reports/payables",
     title: "Vendor aging",
     description: "What is owed to suppliers and how overdue it is.",

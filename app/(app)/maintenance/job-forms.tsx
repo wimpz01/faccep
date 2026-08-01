@@ -402,12 +402,12 @@ export function UsageChecklistForm({
                       className="input tabular-nums"
                       style={{ textAlign: "right" }}
                       value={used[line.id] ?? ""}
-                      onChange={(event) =>
-                        setUsed((current) => ({
-                          ...current,
-                          [line.id]: event.currentTarget.value,
-                        }))
-                      }
+                      onChange={(event) => {
+                        // currentTarget is null by the time the updater runs,
+                        // so take the value now.
+                        const value = event.currentTarget.value;
+                        setUsed((current) => ({ ...current, [line.id]: value }));
+                      }}
                     />
                   </td>
                   <td

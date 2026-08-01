@@ -19,7 +19,12 @@ const periodSchema = z.object({
   provider_amount: z.coerce.number().min(0, "Amount cannot be negative."),
   provider_consumption: z.coerce.number().min(0, "Consumption cannot be negative."),
   genset_expense: z.coerce.number().min(0, "Genset expense cannot be negative."),
-  notes: z.string().trim().optional().or(z.literal("")),
+  // The open-period form has no notes input, so this arrives as null.
+  notes: z
+    .string()
+    .trim()
+    .nullish()
+    .transform((value) => value ?? ""),
 });
 
 export async function createUtilityPeriod(

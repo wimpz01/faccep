@@ -4,7 +4,7 @@ import { useActionState, useMemo, useState } from "react";
 import { useFormStatus } from "react-dom";
 
 import { FormError } from "@/components/ui";
-import { derivedRate, gensetShare, reconcile, round3 } from "@/lib/billing";
+import { derivedRate, gensetShare, reconcile, round2, round3 } from "@/lib/billing";
 import { money } from "@/lib/format";
 
 import type { ActionState } from "./actions";
@@ -190,6 +190,11 @@ export function ProviderBillForm({
   const check = reconcile(Number(consumption), tenantConsumption);
   const unit = period.utility === "water" ? "cu.m" : "kWh";
 
+  // What the sub-metered consumption is worth at the derived rate, and the gap
+  // against what the provider actually charged.
+  const recovered = round2(tenantConsumption * rate);
+  const shortfall = round2((Number(amount) || 0) - recovered);
+
   return (
     <form action={formAction} className="grid gap-4 sm:grid-cols-4">
       <input type="hidden" name="id" value={period.id} />
@@ -270,35 +275,65 @@ export function ProviderBillForm({
           <table className="table">
             <thead>
               <tr>
-                <th>Reconciliation</th>
-                <th className="text-right">Provider</th>
-                <th className="text-right">Sum of sub-meters</th>
-                <th className="text-right">Unbilled / system loss</th>
+                <th>Recovery</th>
+                <th className="text-right">Consumption</th>
+                <th className="text-right">Value</th>
               </tr>
             </thead>
             <tbody>
               <tr>
-                <td className="text-xs muted">
-                  What the provider charged for, against what the tenant meters
-                  account for.
+                <td className="text-sm">
+                  Billed by the provider
+                  <p className="text-xs muted">What the building was charged.</p>
                 </td>
                 <td className="text-right tabular-nums">
                   {round3(check.providerConsumption)} {unit}
                 </td>
                 <td className="text-right tabular-nums">
+                  {money(Number(amount) || 0)}
+                </td>
+              </tr>
+              <tr>
+                <td className="text-sm">
+                  Recovered from tenants
+                  <p className="text-xs muted">
+                    Sum of the sub-meters at the derived rate.
+                  </p>
+                </td>
+                <td className="text-right tabular-nums">
                   {round3(check.tenantConsumptionTotal)} {unit}
+                </td>
+                <td className="text-right tabular-nums">
+                  {money(recovered)}
+                </td>
+              </tr>
+              <tr>
+                <td className="font-semibold">
+                  {shortfall >= 0 ? "Unrecovered — system loss and common areas" : "Over-recovered"}
+                  <p className="text-xs muted">
+                    {shortfall >= 0
+                      ? "Absorbed by the company unless it is billed some other way."
+                      : "Tenants were charged more than the provider billed. Check the readings."}
+                  </p>
                 </td>
                 <td
                   className="text-right tabular-nums font-semibold"
                   style={{
                     color:
-                      Math.abs(check.percentage) > 15
-                        ? "var(--danger)"
-                        : undefined,
+                      Math.abs(check.percentage) > 15 ? "var(--danger)" : undefined,
                   }}
                 >
                   {round3(check.difference)} {unit}
                   <p className="text-xs muted">{check.percentage}%</p>
+                </td>
+                <td
+                  className="text-right tabular-nums font-semibold"
+                  style={{
+                    color:
+                      Math.abs(check.percentage) > 15 ? "var(--danger)" : undefined,
+                  }}
+                >
+                  {money(shortfall)}
                 </td>
               </tr>
             </tbody>
@@ -444,12 +479,15 @@ export function ReadingGrid({
                     style={{ textAlign: "right" }}
                     disabled={isLocked || !canEdit}
                     value={values[row.unitId] ?? ""}
-                    onChange={(event) =>
+                    onChange={(event) => {
+                      // currentTarget is null by the time the updater runs,
+                      // so take the value now.
+                      const value = event.currentTarget.value;
                       setValues((current) => ({
                         ...current,
-                        [row.unitId]: event.currentTarget.value,
-                      }))
-                    }
+                        [row.unitId]: value,
+                      }));
+                    }}
                   />
                 </td>
                 <td className="text-right tabular-nums">

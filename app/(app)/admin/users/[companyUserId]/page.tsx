@@ -12,11 +12,13 @@ import {
   saveUserOverrides,
   unlockUser,
   updateCompanyUser,
+  updateUserCode,
 } from "../actions";
 import {
   CompanyAccessForm,
   ResetPasswordForm,
   UnlockForm,
+  UserCodeForm,
 } from "../user-forms";
 import {
   OverrideMatrix,
@@ -36,6 +38,7 @@ type MemberRow = {
   profiles: {
     full_name: string;
     email: string;
+    user_code: string;
     locked_at: string | null;
     failed_login_attempts: number;
   } | null;
@@ -57,7 +60,7 @@ export default async function UserDetailPage({
   const { data: member } = await supabase
     .from("company_users")
     .select(
-      "id, company_id, user_id, role_id, is_company_admin, is_active, profiles(full_name, email, locked_at, failed_login_attempts), roles(name)",
+      "id, company_id, user_id, role_id, is_company_admin, is_active, profiles(full_name, email, user_code, locked_at, failed_login_attempts), roles(name)",
     )
     .eq("id", companyUserId)
     .maybeSingle<MemberRow>();
@@ -132,8 +135,8 @@ export default async function UserDetailPage({
   return (
     <>
       <PageHeader
-        title={member.profiles?.full_name || "Unnamed user"}
-        description={member.profiles?.email}
+        title={`${member.profiles?.user_code ?? "—"} · ${member.profiles?.full_name || "Unnamed user"}`}
+        description={`Signs in with user code ${member.profiles?.user_code ?? "—"} · ${member.profiles?.email}`}
         action={
           <Link href="/admin/users" className="btn btn-secondary btn-sm">
             Back to users
@@ -161,6 +164,22 @@ export default async function UserDetailPage({
                 attempt(s). Unlocking needs edit rights on Users.
               </p>
             )}
+          </Card>
+        </div>
+      ) : null}
+
+      {canEdit ? (
+        <div className="mb-6">
+          <Card
+            title="Sign-in code"
+            description="What this person types to sign in. Unique across the whole system."
+          >
+            <UserCodeForm
+              action={updateUserCode}
+              userId={member.user_id}
+              companyUserId={member.id}
+              currentCode={member.profiles?.user_code ?? ""}
+            />
           </Card>
         </div>
       ) : null}

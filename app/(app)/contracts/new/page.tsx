@@ -7,7 +7,7 @@ import { MODULE } from "@/lib/permissions";
 
 import { createContract } from "../actions";
 import { ContractForm } from "../contract-form";
-import { loadContractOptions, suggestContractNumber } from "../data";
+import { loadContractOptions } from "../data";
 
 export const metadata: Metadata = { title: "New contract" };
 
@@ -20,10 +20,7 @@ export default async function NewContractPage({
   const context = await requirePermission(MODULE.contracts, "edit");
   const companyId = context.activeCompany!.companyId;
 
-  const [{ tenants, units }, contractNo] = await Promise.all([
-    loadContractOptions(companyId),
-    suggestContractNumber(companyId),
-  ]);
+  const { tenants, units } = await loadContractOptions(companyId);
 
   const preselected = tenant && tenants.some((t) => t.id === tenant) ? tenant : undefined;
 
@@ -46,7 +43,6 @@ export default async function NewContractPage({
         submitLabel="Create draft contract"
         lockTenant={Boolean(preselected)}
         contract={{
-          contract_no: contractNo,
           tenant_id: preselected,
           term_years: 1,
           rent_due_day: 5,

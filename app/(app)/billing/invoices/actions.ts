@@ -153,7 +153,6 @@ export async function generateInvoices(
     }
   }
 
-  const sequence = await nextInvoiceSequence(companyId, year);
   let created = 0;
   let skipped = 0;
   const problems: string[] = [];
@@ -358,15 +357,12 @@ export async function generateInvoices(
       continue;
     }
 
-    const invoiceNo = `INV-${year}-${String(sequence + created).padStart(5, "0")}`;
-
     const { data: invoice, error } = await supabase
       .from("invoices")
       .insert({
         company_id: companyId,
         tenant_id: contract.tenant_id,
         contract_id: contract.id,
-        invoice_no: invoiceNo,
         invoice_date: monthStart,
         due_date: dueDateFor(monthStart, contract.rent_due_day),
         period_start: monthStart,
@@ -456,22 +452,6 @@ type ContractForBilling = {
     sort_order: number;
   }[];
 };
-
-async function nextInvoiceSequence(companyId: string, year: number) {
-  const supabase = await createClient();
-  const prefix = `INV-${year}-`;
-  const { data } = await supabase
-    .from("invoices")
-    .select("invoice_no")
-    .eq("company_id", companyId)
-    .ilike("invoice_no", `${prefix}%`)
-    .order("invoice_no", { ascending: false })
-    .limit(1);
-
-  const last = data?.[0]?.invoice_no;
-  const next = last ? Number(last.slice(prefix.length)) + 1 : 1;
-  return Number.isFinite(next) ? next : 1;
-}
 
 /** Draft -> released. After this the invoice is immutable. */
 export async function releaseInvoice(
@@ -602,30 +582,15 @@ export async function createCreditMemo(
     };
   }
 
-  const year = new Date().getFullYear();
-  const { data: last } = await supabase
-    .from("credit_memos")
-    .select("memo_no")
-    .eq("company_id", companyId)
-    .ilike("memo_no", `CM-${year}-%`)
-    .order("memo_no", { ascending: false })
-    .limit(1);
-
-  const sequence = last?.[0]
-    ? Number(last[0].memo_no.slice(`CM-${year}-`.length)) + 1
-    : 1;
-  const memoNo = `CM-${year}-${String(sequence).padStart(4, "0")}`;
-
   const { data: memo, error } = await supabase
     .from("credit_memos")
     .insert({
       company_id: companyId,
       invoice_id: invoiceId,
-      memo_no: memoNo,
       amount,
       reason,
     })
-    .select("id")
+    .select("id, memo_no")
     .single();
 
   if (error) return { error: error.message };
@@ -635,12 +600,12 @@ export async function createCreditMemo(
     moduleKey: MODULE.billingCreditMemos,
     entityTable: "credit_memos",
     entityId: memo.id,
-    summary: `Issued ${memoNo} for ${amount.toFixed(2)} against invoice ${invoice.invoice_no}: ${reason}`,
+    summary: `Issued ${memo.memo_no} for ${amount.toFixed(2)} against invoice ${invoice.invoice_no}: ${reason}`,
     after: { amount, reason },
   });
 
   revalidatePath(`/billing/invoices/${invoiceId}`);
-  return { success: `Credit memo ${memoNo} issued.` };
+  return { success: `Credit memo ${memo.memo_no} issued.` };
 }
 
 /**

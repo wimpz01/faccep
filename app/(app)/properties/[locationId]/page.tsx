@@ -116,7 +116,7 @@ export default async function LocationUnitsPage({
       />
 
       {canEditUnits ? (
-        <div className="mb-6">
+        <div id="add-unit" className="mb-6" style={{ scrollMarginTop: "1rem" }}>
           <Card
             title="Add a unit"
             description="Sub-meter serials feed the utility computation in Phase 3."
@@ -124,7 +124,9 @@ export default async function LocationUnitsPage({
             <UnitForm
               action={createUnit}
               locationId={locationId}
+              companyId={companyId}
               submitLabel="Create unit"
+              onRecordPhoto={recordUnitPhoto}
             />
           </Card>
         </div>
@@ -181,8 +183,10 @@ export default async function LocationUnitsPage({
                       <UnitForm
                         action={updateUnit}
                         locationId={locationId}
+                        companyId={companyId}
                         unit={unit}
                         submitLabel="Save unit"
+                        onRecordPhoto={recordUnitPhoto}
                       />
                     ) : (
                       <dl className="grid gap-3 sm:grid-cols-3 text-sm">

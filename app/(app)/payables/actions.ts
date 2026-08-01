@@ -71,7 +71,7 @@ export async function createSupplierInvoice(
       notes: parsed.data.notes || null,
       total,
     })
-    .select("id")
+    .select("id, bill_no")
     .single();
 
   if (error) {
@@ -88,12 +88,14 @@ export async function createSupplierInvoice(
     moduleKey: MODULE.payablesInvoices,
     entityTable: "supplier_invoices",
     entityId: data.id,
-    summary: `Recorded supplier invoice ${parsed.data.invoice_no} for ${total.toFixed(2)}.`,
+    summary: `Recorded ${data.bill_no} (supplier ref. ${parsed.data.invoice_no}) for ${total.toFixed(2)}.`,
     after: { ...parsed.data, total },
   });
 
   revalidatePath("/payables");
-  return { success: `Invoice ${parsed.data.invoice_no} recorded.` };
+  return {
+    success: `${data.bill_no} recorded against supplier ref. ${parsed.data.invoice_no}.`,
+  };
 }
 
 /**
@@ -161,7 +163,7 @@ export async function createBillFromOrder(
       total,
       notes: String(formData.get("notes") ?? "").trim() || null,
     })
-    .select("id")
+    .select("id, bill_no")
     .single();
 
   if (error) {
@@ -177,14 +179,14 @@ export async function createBillFromOrder(
     moduleKey: MODULE.payablesInvoices,
     entityTable: "supplier_invoices",
     entityId: bill.id,
-    summary: `Billed ${total.toFixed(2)} against ${order.po_no} as ${invoiceNo}.`,
-    after: { po: order.po_no, amount, vat, withholding, total },
+    summary: `Billed ${total.toFixed(2)} against ${order.po_no} as ${bill.bill_no} (supplier ref. ${invoiceNo}).`,
+    after: { po: order.po_no, supplier_ref: invoiceNo, amount, vat, withholding, total },
   });
 
   revalidatePath(`/purchasing/orders/${poId}`);
   revalidatePath("/payables");
   return {
-    success: `${invoiceNo} recorded against ${order.po_no} and posted to payables.`,
+    success: `${bill.bill_no} recorded against ${order.po_no} and posted to payables.`,
   };
 }
 
@@ -283,20 +285,6 @@ export async function createVoucher(
     }
   }
 
-  const year = new Date().getFullYear();
-  const prefix = `CV-${year}-`;
-  const { data: last } = await supabase
-    .from("check_vouchers")
-    .select("voucher_no")
-    .eq("company_id", companyId)
-    .ilike("voucher_no", `${prefix}%`)
-    .order("voucher_no", { ascending: false })
-    .limit(1);
-  const sequence = last?.[0]
-    ? Number(last[0].voucher_no.slice(prefix.length)) + 1
-    : 1;
-  const voucherNo = `${prefix}${String(Number.isFinite(sequence) ? sequence : 1).padStart(4, "0")}`;
-
   const amount = round2(applications.reduce((sum, row) => sum + row.amount, 0));
 
   const { data: voucher, error } = await supabase
@@ -304,13 +292,12 @@ export async function createVoucher(
     .insert({
       company_id: companyId,
       vendor_id: vendorId,
-      voucher_no: voucherNo,
       amount,
       check_no: String(formData.get("check_no") ?? "").trim() || null,
       bank: String(formData.get("bank") ?? "").trim() || null,
       notes: String(formData.get("notes") ?? "").trim() || null,
     })
-    .select("id")
+    .select("id, voucher_no")
     .single();
 
   if (error) return { error: error.message };
@@ -325,12 +312,12 @@ export async function createVoucher(
     moduleKey: MODULE.payablesVouchers,
     entityTable: "check_vouchers",
     entityId: voucher.id,
-    summary: `Prepared voucher ${voucherNo} for ${amount.toFixed(2)}.`,
+    summary: `Prepared voucher ${voucher.voucher_no} for ${amount.toFixed(2)}.`,
     after: { applications },
   });
 
   revalidatePath("/payables");
-  return { success: `${voucherNo} prepared. Release it to settle the invoices.` };
+  return { success: `${voucher.voucher_no} prepared. Release it to settle the invoices.` };
 }
 
 /**

@@ -20,6 +20,7 @@ export const metadata: Metadata = { title: "Payables" };
 type BillRow = {
   id: string;
   invoice_no: string;
+  bill_no: string;
   vendor_id: string;
   invoice_date: string;
   due_date: string;
@@ -61,7 +62,7 @@ export default async function PayablesPage() {
     supabase
       .from("supplier_invoices")
       .select(
-        "id, invoice_no, vendor_id, invoice_date, due_date, amount, vat_amount, withholding_tax, total, amount_paid, status, vendors(name), maintenance_jobs(job_no, job_kind)",
+        "id, invoice_no, bill_no, vendor_id, invoice_date, due_date, amount, vat_amount, withholding_tax, total, amount_paid, status, vendors(name), maintenance_jobs(job_no, job_kind)",
       )
       .eq("company_id", companyId)
       .order("due_date")
@@ -192,9 +193,12 @@ export default async function PayablesPage() {
                     return (
                       <tr key={bill.id}>
                         <td>
-                          <span className="font-medium text-sm">
-                            {bill.invoice_no}
+                          <span className="font-semibold text-sm tabular-nums">
+                            {bill.bill_no}
                           </span>
+                          <p className="text-xs muted">
+                            Supplier ref. {bill.invoice_no}
+                          </p>
                           {bill.maintenance_jobs?.job_no ? (
                             <p className="text-xs muted">
                               {bill.maintenance_jobs.job_no} (

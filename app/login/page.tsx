@@ -34,8 +34,8 @@ export default async function LoginPage({
         </div>
 
         <p className="text-xs muted mt-4 text-center">
-          Accounts are created by an administrator. Contact your admin if you
-          cannot sign in.
+          Sign in with the user code your administrator gave you. Three wrong
+          attempts will lock the account.
         </p>
       </div>
     </main>

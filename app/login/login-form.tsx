@@ -22,17 +22,19 @@ export function LoginForm({ next }: { next?: string }) {
       {next ? <input type="hidden" name="next" value={next} /> : null}
 
       <div>
-        <label className="label" htmlFor="email">
-          Email
+        <label className="label" htmlFor="user_code">
+          User code
         </label>
         <input
-          id="email"
-          name="email"
-          type="email"
+          id="user_code"
+          name="user_code"
           autoComplete="username"
           required
+          autoCapitalize="characters"
+          spellCheck={false}
           className="input"
-          placeholder="you@company.com"
+          placeholder="e.g. CASHIER01"
+          style={{ textTransform: "uppercase" }}
         />
       </div>
 

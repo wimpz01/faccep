@@ -29,22 +29,95 @@ function Submit({ label }: { label: string }) {
   );
 }
 
+type StagedPhoto = { file: File; previewUrl: string };
+
 export function UnitForm({
   action,
   locationId,
+  companyId,
   unit,
   submitLabel,
+  onRecordPhoto,
 }: {
   action: (state: ActionState, formData: FormData) => Promise<ActionState>;
   locationId: string;
+  companyId: string;
   unit?: UnitValues;
   submitLabel: string;
+  onRecordPhoto: (formData: FormData) => Promise<void>;
 }) {
-  const [state, formAction] = useActionState<ActionState, FormData>(action, {});
   const key = unit?.id ?? "new";
+  const isNew = !unit?.id;
+  const formRef = useRef<HTMLFormElement>(null);
+
+  const [appliances, setAppliances] = useState<string[]>(unit?.appliances ?? []);
+  const [draft, setDraft] = useState("");
+  const [staged, setStaged] = useState<StagedPhoto[]>([]);
+
+  function addAppliance() {
+    const value = draft.trim();
+    if (!value) return;
+    setAppliances((current) =>
+      current.includes(value) ? current : [...current, value],
+    );
+    setDraft("");
+  }
+
+  // Photos belong to a unit id that does not exist until the insert returns, so
+  // the upload runs after the action rather than as part of the submitted form.
+  // Keeping it inside the action means useFormStatus stays pending throughout.
+  const [state, formAction] = useActionState<ActionState, FormData>(
+    async (previous, formData) => {
+      const result = await action(previous, formData);
+      if (!result.unitId) return result;
+
+      const photos = staged;
+      const supabase = createClient();
+
+      for (const photo of photos) {
+        const safeName = photo.file.name.replace(/[^\w.-]+/g, "_");
+        const path = `${companyId}/${result.unitId}/${Date.now()}-${safeName}`;
+
+        const { error } = await supabase.storage
+          .from("unit-photos")
+          .upload(path, photo.file, { upsert: false });
+
+        if (error) {
+          return {
+            ...result,
+            error: `Unit saved, but a photo failed to upload: ${error.message}`,
+          };
+        }
+
+        const record = new FormData();
+        record.set("unitId", result.unitId);
+        record.set("storagePath", path);
+        record.set("locationId", locationId);
+        await onRecordPhoto(record);
+      }
+
+      // Clear down so the form is ready for the next unit.
+      photos.forEach((photo) => URL.revokeObjectURL(photo.previewUrl));
+      setStaged([]);
+      setAppliances([]);
+      setDraft("");
+      formRef.current?.reset();
+
+      return {
+        ...result,
+        success:
+          photos.length > 0
+            ? `${result.success} ${photos.length} photo${
+                photos.length === 1 ? "" : "s"
+              } uploaded.`
+            : result.success,
+      };
+    },
+    {},
+  );
 
   return (
-    <form action={formAction} className="grid gap-4 sm:grid-cols-3">
+    <form ref={formRef} action={formAction} className="grid gap-4 sm:grid-cols-3">
       <input type="hidden" name="locationId" value={locationId} />
       {unit?.id ? <input type="hidden" name="id" value={unit.id} /> : null}
 
@@ -135,14 +208,65 @@ export function UnitForm({
         <label className="label" htmlFor={`appliances-${key}`}>
           Included appliances
         </label>
-        <input
-          id={`appliances-${key}`}
-          name="appliances"
-          className="input"
-          placeholder="bed, TV, ref"
-          defaultValue={(unit?.appliances ?? []).join(", ")}
-        />
-        <p className="text-xs muted mt-1">Separate with commas.</p>
+        <div className="flex gap-2 flex-wrap">
+          <input
+            id={`appliances-${key}`}
+            className="input"
+            style={{ maxWidth: "18rem" }}
+            placeholder="bed"
+            value={draft}
+            onChange={(event) => setDraft(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              // Enter means "add this one", not "submit the unit".
+              if (event.key !== "Enter") return;
+              event.preventDefault();
+              addAppliance();
+            }}
+          />
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={addAppliance}
+            disabled={draft.trim() === ""}
+          >
+            Add
+          </button>
+        </div>
+
+        {appliances.length > 0 ? (
+          <ul className="flex gap-2 flex-wrap mt-2">
+            {appliances.map((item) => (
+              <li
+                key={item}
+                className="badge"
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "0.4rem",
+                }}
+              >
+                <input type="hidden" name="appliances" value={item} />
+                {item}
+                <button
+                  type="button"
+                  aria-label={`Remove ${item}`}
+                  onClick={() =>
+                    setAppliances((current) =>
+                      current.filter((entry) => entry !== item),
+                    )
+                  }
+                  style={{ fontWeight: 700, lineHeight: 1 }}
+                >
+                  ×
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-xs muted mt-1">
+            Add them one at a time — none listed yet.
+          </p>
+        )}
       </div>
 
       <div className="sm:col-span-3">
@@ -157,6 +281,69 @@ export function UnitForm({
           defaultValue={unit?.description ?? ""}
         />
       </div>
+
+      {isNew ? (
+        <div className="sm:col-span-3">
+          <label className="label" htmlFor={`photos-${key}`}>
+            Photos
+          </label>
+          <input
+            id={`photos-${key}`}
+            type="file"
+            accept="image/jpeg,image/png,image/webp"
+            multiple
+            className="input"
+            style={{ maxWidth: "22rem" }}
+            onChange={(event) => {
+              const chosen = Array.from(event.currentTarget.files ?? []);
+              event.currentTarget.value = "";
+              if (chosen.length === 0) return;
+              setStaged((current) => [
+                ...current,
+                ...chosen.map((file) => ({
+                  file,
+                  previewUrl: URL.createObjectURL(file),
+                })),
+              ]);
+            }}
+          />
+          <p className="text-xs muted mt-1">
+            Uploaded once the unit is created. JPEG, PNG or WebP.
+          </p>
+
+          {staged.length > 0 ? (
+            <div className="flex gap-3 flex-wrap mt-3">
+              {staged.map((photo) => (
+                <figure key={photo.previewUrl} className="w-32">
+                  {
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={photo.previewUrl}
+                      alt={photo.file.name}
+                      className="w-32 h-24 object-cover rounded-lg border"
+                      style={{ borderColor: "var(--border)" }}
+                    />
+                  }
+                  <button
+                    type="button"
+                    className="btn btn-danger btn-sm w-full mt-1"
+                    onClick={() =>
+                      setStaged((current) => {
+                        URL.revokeObjectURL(photo.previewUrl);
+                        return current.filter(
+                          (entry) => entry.previewUrl !== photo.previewUrl,
+                        );
+                      })
+                    }
+                  >
+                    Remove
+                  </button>
+                </figure>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       <div className="sm:col-span-3 flex items-center gap-3 flex-wrap">
         <Submit label={submitLabel} />

@@ -8,7 +8,13 @@ import { assertPermission, getSessionContext } from "@/lib/auth";
 import { MODULE, can } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
 
-export type ActionState = { error?: string; success?: string };
+// unitId comes back on create so the form can upload the photos it staged
+// while the unit did not exist yet.
+export type ActionState = {
+  error?: string;
+  success?: string;
+  unitId?: string;
+};
 
 const optionalNumber = z
   .string()
@@ -27,7 +33,8 @@ const unitSchema = z.object({
     .number({ invalid_type_error: "Enter a monthly rate." })
     .min(0, "Monthly rate cannot be negative."),
   description: z.string().trim().optional().or(z.literal("")),
-  appliances: z.string().trim().optional().or(z.literal("")),
+  // One entry per appliance the form has added; absent means none.
+  appliances: z.array(z.string()).default([]),
   water_meter_serial: z.string().trim().optional().or(z.literal("")),
   electric_meter_serial: z.string().trim().optional().or(z.literal("")),
 });
@@ -39,7 +46,7 @@ function readForm(formData: FormData) {
     area_sqm: formData.get("area_sqm"),
     monthly_rate: formData.get("monthly_rate"),
     description: formData.get("description"),
-    appliances: formData.get("appliances"),
+    appliances: formData.getAll("appliances").map(String),
     water_meter_serial: formData.get("water_meter_serial"),
     electric_meter_serial: formData.get("electric_meter_serial"),
   });
@@ -52,13 +59,7 @@ function toRow(values: z.infer<typeof unitSchema>) {
     area_sqm: values.area_sqm,
     monthly_rate: values.monthly_rate,
     description: values.description || null,
-    // Comma-separated in the form, e.g. "bed, TV, ref".
-    appliances: values.appliances
-      ? values.appliances
-          .split(",")
-          .map((item) => item.trim())
-          .filter(Boolean)
-      : [],
+    appliances: values.appliances.map((item) => item.trim()).filter(Boolean),
     water_meter_serial: values.water_meter_serial || null,
     electric_meter_serial: values.electric_meter_serial || null,
   };
@@ -107,7 +108,7 @@ export async function createUnit(
 
   revalidatePath(`/properties/${locationId}`);
   revalidatePath("/properties");
-  return { success: `Unit ${data.code} created.` };
+  return { success: `Unit ${data.code} created.`, unitId: data.id };
 }
 
 export async function updateUnit(

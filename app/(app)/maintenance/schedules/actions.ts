@@ -72,31 +72,18 @@ export async function raiseScheduledJob(formData: FormData) {
     .single();
   if (!schedule) return;
 
-  const year = new Date().getFullYear();
-  const prefix = `JOB-${year}-`;
-  const { data: last } = await supabase
-    .from("maintenance_jobs")
-    .select("job_no")
-    .eq("company_id", companyId)
-    .ilike("job_no", `${prefix}%`)
-    .order("job_no", { ascending: false })
-    .limit(1);
-  const sequence = last?.[0] ? Number(last[0].job_no.slice(prefix.length)) + 1 : 1;
-  const jobNo = `${prefix}${String(Number.isFinite(sequence) ? sequence : 1).padStart(4, "0")}`;
-
   const { data: job, error } = await supabase
     .from("maintenance_jobs")
     .insert({
       company_id: companyId,
       schedule_id: scheduleId,
-      job_no: jobNo,
       title: schedule.title,
       description: schedule.description,
       location_id: schedule.location_id,
       assigned_to: schedule.assigned_to,
       status: "approved",
     })
-    .select("id")
+    .select("id, job_no")
     .single();
 
   if (error) return;
@@ -106,7 +93,7 @@ export async function raiseScheduledJob(formData: FormData) {
     moduleKey: MODULE.maintenanceScheduled,
     entityTable: "maintenance_jobs",
     entityId: job.id,
-    summary: `Raised ${jobNo} from the maintenance schedule.`,
+    summary: `Raised ${job.job_no} from the maintenance schedule.`,
   });
 
   revalidatePath("/maintenance/schedules");

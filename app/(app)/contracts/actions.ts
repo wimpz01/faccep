@@ -13,23 +13,28 @@ export type ActionState = { error?: string; success?: string };
 
 const money = z.coerce.number().min(0, "Amounts cannot be negative.");
 
+// These inputs are disabled when the billing type does not use them, and a
+// disabled input is never submitted -- so formData.get returns null, not "".
 const optionalMoney = z
   .string()
   .trim()
-  .optional()
-  .transform((value) =>
-    value === "" || value === undefined ? null : Number(value),
-  )
+  .nullish()
+  .transform((value) => (value === "" || value == null ? null : Number(value)))
   .refine((value) => value === null || (Number.isFinite(value) && value >= 0), {
     message: "Enter a valid amount.",
   });
+
+const optionalText = z
+  .string()
+  .trim()
+  .nullish()
+  .transform((value) => value ?? "");
 
 const billingType = z.enum(["fixed", "minimum_overage", "consumption"]);
 
 const contractSchema = z
   .object({
     tenant_id: z.string().uuid("Choose a tenant."),
-    contract_no: z.string().trim().min(1, "Contract number is required."),
     start_date: z.string().min(10, "Choose a start date."),
     end_date: z.string().min(10, "Choose an end date."),
     term_years: z.coerce.number().int().min(1, "Term must be at least 1 year."),
@@ -53,10 +58,10 @@ const contractSchema = z
     electric_billing_type: billingType,
     electric_fixed_amount: optionalMoney,
     electric_minimum_amount: optionalMoney,
-    repair_responsibility: z.string().trim().optional().or(z.literal("")),
-    renewal_terms: z.string().trim().optional().or(z.literal("")),
-    termination_grounds: z.string().trim().optional().or(z.literal("")),
-    notes: z.string().trim().optional().or(z.literal("")),
+    repair_responsibility: optionalText,
+    renewal_terms: optionalText,
+    termination_grounds: optionalText,
+    notes: optionalText,
   })
   .refine((data) => data.end_date > data.start_date, {
     message: "End date must fall after the start date.",
@@ -98,7 +103,6 @@ const contractSchema = z
 function readForm(formData: FormData) {
   return contractSchema.safeParse({
     tenant_id: formData.get("tenant_id"),
-    contract_no: formData.get("contract_no"),
     start_date: formData.get("start_date"),
     end_date: formData.get("end_date"),
     term_years: formData.get("term_years"),
@@ -124,7 +128,6 @@ function readForm(formData: FormData) {
 function toRow(values: z.infer<typeof contractSchema>) {
   return {
     tenant_id: values.tenant_id,
-    contract_no: values.contract_no,
     start_date: values.start_date,
     end_date: values.end_date,
     term_years: values.term_years,
@@ -248,9 +251,6 @@ export async function createContract(
     .single();
 
   if (error) {
-    if (error.code === "23505") {
-      return { error: "That contract number is already used in this company." };
-    }
     // Raised by reject_blacklisted_tenant.
     if (error.message.includes("blacklisted")) {
       return { error: "This tenant is blacklisted and cannot be given a contract." };
@@ -270,7 +270,9 @@ export async function createContract(
     after: { ...toRow(parsed.data), units: unitIds.length },
   });
 
-  redirect(`/contracts/${data.id}`);
+  // The same form is embedded in the tenant set-up, which wants to stay put.
+  const returnTo = String(formData.get("return_to") ?? "");
+  redirect(returnTo.startsWith("/") ? returnTo : `/contracts/${data.id}`);
 }
 
 export async function updateContract(
@@ -304,21 +306,13 @@ export async function updateContract(
   const row = toRow(parsed.data);
   const { error } = await supabase.from("contracts").update(row).eq("id", id);
 
-  if (error) {
-    return {
-      error:
-        error.code === "23505"
-          ? "That contract number is already used in this company."
-          : error.message,
-    };
-  }
+  if (error) return { error: error.message };
 
   const selectionError = await replaceSelections(id, unitIds, inclusions);
   if (selectionError) return { error: selectionError };
 
   const diff = before
     ? changedFields(before, {
-        contract_no: row.contract_no,
         start_date: row.start_date,
         end_date: row.end_date,
         term_years: row.term_years,
@@ -338,12 +332,15 @@ export async function updateContract(
     moduleKey: MODULE.contracts,
     entityTable: "contracts",
     entityId: id,
-    summary: `Updated contract ${row.contract_no}.`,
+    summary: `Updated contract ${before?.contract_no ?? id}.`,
     before: diff.before,
     after: diff.after,
   });
 
   revalidatePath(`/contracts/${id}`);
+  const returnTo = String(formData.get("return_to") ?? "");
+  if (returnTo.startsWith("/")) revalidatePath(returnTo);
+
   return { success: "Contract saved." };
 }
 

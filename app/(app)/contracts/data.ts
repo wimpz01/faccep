@@ -56,21 +56,3 @@ export async function loadContractOptions(
   return { tenants: tenants ?? [], units: unitOptions };
 }
 
-/** Suggests the next contract number, e.g. CT-2026-0004. */
-export async function suggestContractNumber(companyId: string) {
-  const supabase = await createClient();
-  const year = new Date().getFullYear();
-  const prefix = `CT-${year}-`;
-
-  const { data } = await supabase
-    .from("contracts")
-    .select("contract_no")
-    .eq("company_id", companyId)
-    .ilike("contract_no", `${prefix}%`)
-    .order("contract_no", { ascending: false })
-    .limit(1);
-
-  const last = data?.[0]?.contract_no;
-  const nextSequence = last ? Number(last.slice(prefix.length)) + 1 : 1;
-  return `${prefix}${String(Number.isFinite(nextSequence) ? nextSequence : 1).padStart(4, "0")}`;
-}

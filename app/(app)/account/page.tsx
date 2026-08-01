@@ -32,7 +32,14 @@ export default async function AccountPage() {
           <table className="table">
             <tbody>
               <tr>
-                <th style={{ width: "14rem" }}>Signed in as</th>
+                <th style={{ width: "14rem" }}>User code</th>
+                <td>
+                  <strong className="tabular-nums">{context.userCode}</strong>
+                  <p className="text-xs muted">This is what you sign in with.</p>
+                </td>
+              </tr>
+              <tr>
+                <th>Signed in as</th>
                 <td>
                   {context.fullName}
                   <p className="text-xs muted break-all">{context.email}</p>

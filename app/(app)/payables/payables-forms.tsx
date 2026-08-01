@@ -78,9 +78,12 @@ export function SupplierInvoiceForm({
       </div>
       <div>
         <label className="label" htmlFor="si-no">
-          Invoice number *
+          Supplier&rsquo;s invoice no. *
         </label>
         <input id="si-no" name="invoice_no" className="input" required />
+        <p className="text-xs muted mt-1">
+          Their reference. Ours is issued on save.
+        </p>
       </div>
       <div>
         <label className="label" htmlFor="si-date">
@@ -244,9 +247,12 @@ export function BillFromOrderForm({
 
       <div>
         <label className="label" htmlFor="bill-no">
-          Supplier invoice no. *
+          Supplier&rsquo;s invoice no. *
         </label>
         <input id="bill-no" name="invoice_no" className="input" required />
+        <p className="text-xs muted mt-1">
+          Their reference. Ours is issued on save.
+        </p>
       </div>
       <div>
         <label className="label" htmlFor="bill-date">
@@ -448,12 +454,15 @@ export function VoucherForm({
                           className="input tabular-nums"
                           style={{ textAlign: "right" }}
                           value={amounts[bill.id] ?? ""}
-                          onChange={(event) =>
+                          onChange={(event) => {
+                            // currentTarget is null by the time the updater
+                            // runs, so take the value now.
+                            const value = event.currentTarget.value;
                             setAmounts((current) => ({
                               ...current,
-                              [bill.id]: event.currentTarget.value,
-                            }))
-                          }
+                              [bill.id]: value,
+                            }));
+                          }}
                         />
                       </td>
                     </tr>

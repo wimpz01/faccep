@@ -108,10 +108,15 @@ export default async function DashboardPage() {
     can(permissions, MODULE.paymentsPdc, "view")
       ? supabase
           .from("postdated_checks")
-          .select("id, check_no, bank, amount, maturity_date, status, tenants(company_name)")
+          .select(
+            "id, check_no, bank, amount, maturity_date, status, payment_id, tenants(company_name)",
+          )
           .eq("company_id", companyId)
-          .in("status", ["pending", "matured"])
-          .lte("maturity_date", pdcCutoff)
+          // Cleared cheques are carried too: one that never became a collection
+          // leaves its invoice looking unpaid.
+          .or(
+            `and(status.in.(pending,matured),maturity_date.lte.${pdcCutoff}),and(status.eq.cleared,payment_id.is.null)`,
+          )
           .order("maturity_date")
           .returns<
             {
@@ -121,6 +126,7 @@ export default async function DashboardPage() {
               amount: string;
               maturity_date: string;
               status: string;
+              payment_id: string | null;
               tenants: { company_name: string } | null;
             }[]
           >()
@@ -210,6 +216,22 @@ export default async function DashboardPage() {
     0,
   );
 
+  // A cheque that has reached its date is the cashier's job today; one still
+  // dated ahead is only a heads-up. They are listed apart for that reason.
+  const chequesToCollect = (cheques ?? []).filter(
+    (cheque) => cheque.status === "cleared",
+  );
+  const chequesToDeposit = (cheques ?? []).filter(
+    (cheque) => cheque.status !== "cleared" && cheque.maturity_date <= today,
+  );
+  const chequesMaturingSoon = (cheques ?? []).filter(
+    (cheque) => cheque.status !== "cleared" && cheque.maturity_date > today,
+  );
+  const depositValue = chequesToDeposit.reduce(
+    (sum, cheque) => sum + Number(cheque.amount),
+    0,
+  );
+
   const notificationCount =
     overdue.length + dueSoon.length + renewals.length + (cheques?.length ?? 0);
 
@@ -219,6 +241,33 @@ export default async function DashboardPage() {
         title={context.activeCompany.companyName}
         description="Occupancy, receivables and what needs attention this week."
       />
+
+      {chequesToDeposit.length > 0 ? (
+        <div
+          className="card mb-6"
+          style={{ borderColor: "var(--danger)", borderWidth: "1.5px" }}
+        >
+          <div className="card-body flex items-center justify-between gap-4 flex-wrap">
+            <p className="text-sm">
+              <strong style={{ color: "var(--danger)" }}>
+                {chequesToDeposit.length} cheque
+                {chequesToDeposit.length === 1 ? " has" : "s have"} matured and{" "}
+                {chequesToDeposit.length === 1 ? "is" : "are"} still undeposited
+              </strong>
+              <span className="muted">
+                {" "}
+                — {money(depositValue)} waiting to be banked.
+              </span>
+            </p>
+            <Link
+              href="/payments/pdc/deposit-slip"
+              className="btn btn-primary btn-sm"
+            >
+              Prepare deposit slip
+            </Link>
+          </div>
+        </div>
+      ) : null}
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-6">
         {seeOccupancy ? (
@@ -340,7 +389,56 @@ export default async function DashboardPage() {
                       );
                     })}
 
-                    {(cheques ?? []).map((cheque) => (
+                    {chequesToCollect.map((cheque) => (
+                      <tr key={`collect-${cheque.id}`}>
+                        <td>
+                          <span className="badge badge-brand">collect</span>
+                        </td>
+                        <td>
+                          <Link
+                            href={`/payments/pdc/${cheque.id}/collect`}
+                            style={{ color: "var(--color-brand-600)" }}
+                          >
+                            {cheque.check_no}
+                          </Link>{" "}
+                          — {cheque.tenants?.company_name}
+                          <p className="text-xs muted">
+                            {cheque.bank} · cleared — post the collection
+                          </p>
+                        </td>
+                        <td className="text-right tabular-nums">
+                          {money(cheque.amount)}
+                        </td>
+                      </tr>
+                    ))}
+
+                    {chequesToDeposit.map((cheque) => (
+                      <tr key={`deposit-${cheque.id}`}>
+                        <td>
+                          <span className="badge" style={{ color: "var(--danger)" }}>
+                            deposit
+                          </span>
+                        </td>
+                        <td>
+                          <Link
+                            href="/payments/pdc/deposit-slip"
+                            style={{ color: "var(--color-brand-600)" }}
+                          >
+                            {cheque.check_no}
+                          </Link>{" "}
+                          — {cheque.tenants?.company_name}
+                          <p className="text-xs muted">
+                            {cheque.bank} · matured{" "}
+                            {formatDate(cheque.maturity_date)} — bank it
+                          </p>
+                        </td>
+                        <td className="text-right tabular-nums">
+                          {money(cheque.amount)}
+                        </td>
+                      </tr>
+                    ))}
+
+                    {chequesMaturingSoon.map((cheque) => (
                       <tr key={`pdc-${cheque.id}`}>
                         <td>
                           <span className="badge">cheque</span>

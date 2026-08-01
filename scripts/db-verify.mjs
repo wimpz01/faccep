@@ -1476,6 +1476,38 @@ async function main() {
       where id = ${lit(closePeriod)};`,
   );
 
+  console.log("\nSign in by user code");
+
+  const codes = await db.query(`
+    select user_code, email from public.profiles
+     where id in (${lit(regular)}, ${lit(companyAdmin)}) order by email;
+  `);
+  check(
+    "every account gets a user code automatically",
+    codes.every((row) => row.user_code && row.user_code.length > 0),
+    true,
+  );
+  check(
+    "codes are unique",
+    new Set(codes.map((row) => row.user_code.toLowerCase())).size,
+    codes.length,
+  );
+
+  const codeLookup = await db.query(
+    `select public.email_for_user_code(${lit(codes[0].user_code)}) as email;`,
+  );
+  check("a code resolves to its email", codeLookup[0].email, codes[0].email);
+
+  const lowercasedLookup = await db.query(
+    `select public.email_for_user_code(${lit(codes[0].user_code.toLowerCase())}) as email;`,
+  );
+  check("and matching ignores case", lowercasedLookup[0].email, codes[0].email);
+
+  const unknownLookup = await db.query(
+    "select public.email_for_user_code('NOSUCHCODE') as email;",
+  );
+  check("an unknown code resolves to nothing", unknownLookup[0].email, null);
+
   console.log("\nFailed-login lockout");
 
   const lockEmail = `${TEST_TAG}-regular@example.invalid`;

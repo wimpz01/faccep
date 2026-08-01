@@ -153,28 +153,15 @@ export async function createJournalEntry(
 
   const supabase = await createClient();
   const entryDate = String(formData.get("entry_date") ?? "").slice(0, 10);
-  const year = entryDate ? Number(entryDate.slice(0, 4)) : new Date().getFullYear();
-  const prefix = `JV-${year}-`;
-
-  const { data: last } = await supabase
-    .from("journal_entries")
-    .select("entry_no")
-    .eq("company_id", companyId)
-    .ilike("entry_no", `${prefix}%`)
-    .order("entry_no", { ascending: false })
-    .limit(1);
-  const sequence = last?.[0] ? Number(last[0].entry_no.slice(prefix.length)) + 1 : 1;
-  const entryNo = `${prefix}${String(Number.isFinite(sequence) ? sequence : 1).padStart(5, "0")}`;
 
   const { data: entry, error } = await supabase
     .from("journal_entries")
     .insert({
       company_id: companyId,
-      entry_no: entryNo,
       entry_date: entryDate || new Date().toISOString().slice(0, 10),
       memo: String(formData.get("memo") ?? "").trim() || null,
     })
-    .select("id")
+    .select("id, entry_no")
     .single();
 
   if (error) return { error: error.message };
@@ -189,7 +176,7 @@ export async function createJournalEntry(
     moduleKey: MODULE.accountingJournal,
     entityTable: "journal_entries",
     entityId: entry.id,
-    summary: `Drafted journal entry ${entryNo} for ${totalDebit.toFixed(2)}.`,
+    summary: `Drafted journal entry ${entry.entry_no} for ${totalDebit.toFixed(2)}.`,
     after: { lines },
   });
 
@@ -344,28 +331,15 @@ export async function reverseJournalEntry(
     return { error: "Only a posted entry can be reversed." };
   }
 
-  const year = new Date().getFullYear();
-  const prefix = `JV-${year}-`;
-  const { data: last } = await supabase
-    .from("journal_entries")
-    .select("entry_no")
-    .eq("company_id", companyId)
-    .ilike("entry_no", `${prefix}%`)
-    .order("entry_no", { ascending: false })
-    .limit(1);
-  const sequence = last?.[0] ? Number(last[0].entry_no.slice(prefix.length)) + 1 : 1;
-  const entryNo = `${prefix}${String(Number.isFinite(sequence) ? sequence : 1).padStart(5, "0")}`;
-
   const { data: reversal, error } = await supabase
     .from("journal_entries")
     .insert({
       company_id: companyId,
-      entry_no: entryNo,
       entry_date: new Date().toISOString().slice(0, 10),
       memo: `Reversal of ${original.entry_no}: ${reason}`,
       reverses_id: id,
     })
-    .select("id")
+    .select("id, entry_no")
     .single();
 
   if (error) return { error: error.message };
@@ -400,8 +374,8 @@ export async function reverseJournalEntry(
     moduleKey: MODULE.accountingJournal,
     entityTable: "journal_entries",
     entityId: id,
-    summary: `Reversed ${original.entry_no} with ${entryNo}: ${reason}`,
-    after: { reversal_entry: entryNo },
+    summary: `Reversed ${original.entry_no} with ${reversal.entry_no}: ${reason}`,
+    after: { reversal_entry: reversal.entry_no },
   });
 
   revalidatePath("/accounting/journal");

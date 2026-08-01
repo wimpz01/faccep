@@ -4,7 +4,7 @@ import Link from "next/link";
 import { Card, EmptyState, PageHeader, StatTile } from "@/components/ui";
 import { requirePermission } from "@/lib/auth";
 import { money } from "@/lib/format";
-import { MODULE } from "@/lib/permissions";
+import { MODULE, can } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
 
 import { PROPERTY_TYPES } from "../admin/locations/constants";
@@ -28,6 +28,7 @@ const TYPE_LABELS = Object.fromEntries(
 export default async function PropertiesPage() {
   const context = await requirePermission(MODULE.properties, "view");
   const companyId = context.activeCompany!.companyId;
+  const canEditUnits = can(context.permissions, MODULE.units, "edit");
 
   const supabase = await createClient();
   const { data: locations } = await supabase
@@ -108,6 +109,7 @@ export default async function PropertiesPage() {
                   <th className="text-right">Vacant</th>
                   <th className="text-right">Occupancy</th>
                   <th className="text-right">Contracted rent</th>
+                  {canEditUnits ? <th /> : null}
                 </tr>
               </thead>
               <tbody>
@@ -138,6 +140,16 @@ export default async function PropertiesPage() {
                     <td className="text-right tabular-nums">
                       {money(row.contracted)}
                     </td>
+                    {canEditUnits ? (
+                      <td className="text-right">
+                        <Link
+                          href={`/properties/${row.id}#add-unit`}
+                          className="btn btn-primary btn-sm"
+                        >
+                          Add unit
+                        </Link>
+                      </td>
+                    ) : null}
                   </tr>
                 ))}
               </tbody>

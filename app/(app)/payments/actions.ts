@@ -21,6 +21,8 @@ const paymentSchema = z.object({
   amount: z.coerce.number().positive("Enter an amount greater than zero."),
   reference: z.string().trim().optional().or(z.literal("")),
   notes: z.string().trim().optional().or(z.literal("")),
+  check_bank: z.string().trim().nullish().transform((value) => value ?? ""),
+  check_date: z.string().trim().nullish().transform((value) => value ?? ""),
 });
 
 /**
@@ -49,8 +51,67 @@ export async function recordPayment(
     amount: formData.get("amount"),
     reference: formData.get("reference"),
     notes: formData.get("notes"),
+    check_bank: formData.get("check_bank"),
+    check_date: formData.get("check_date"),
   });
   if (!parsed.success) return { error: parsed.error.issues[0].message };
+
+  const supabase = await createClient();
+
+  // A cheque dated in the future is not a collection. It is held against the
+  // tenant under Postdated cheques and only becomes a payment once deposited,
+  // so it must not settle an invoice or count towards this month's takings.
+  if (parsed.data.payment_mode === "check" && formData.get("postdated") === "on") {
+    // Holding a cheque is a postdated-cheque action, not a collection.
+    try {
+      await assertPermission(MODULE.paymentsPdc, "edit");
+    } catch {
+      return {
+        error:
+          "Recording a postdated cheque needs Edit on postdated cheques. Untick Postdated to record it as a payment instead.",
+      };
+    }
+
+    if (!parsed.data.reference) return { error: "Enter the cheque number." };
+    if (!parsed.data.check_bank) return { error: "Enter the drawee bank." };
+    if (!parsed.data.check_date) return { error: "Enter the cheque date." };
+
+    const { data: cheque, error: chequeError } = await supabase
+      .from("postdated_checks")
+      .insert({
+        company_id: companyId,
+        tenant_id: parsed.data.tenant_id,
+        check_no: parsed.data.reference,
+        bank: parsed.data.check_bank,
+        amount: parsed.data.amount,
+        maturity_date: parsed.data.check_date,
+        notes: parsed.data.notes || null,
+      })
+      .select("id, pdc_no")
+      .single();
+
+    if (chequeError) {
+      return {
+        error:
+          chequeError.code === "23505"
+            ? "That cheque number is already recorded for this bank."
+            : chequeError.message,
+      };
+    }
+
+    await logAudit({
+      action: "create",
+      moduleKey: MODULE.paymentsPdc,
+      entityTable: "postdated_checks",
+      entityId: cheque.id,
+      summary: `Recorded ${cheque.pdc_no} — postdated cheque ${parsed.data.reference} (${parsed.data.check_bank}) for ${parsed.data.amount.toFixed(2)}, dated ${parsed.data.check_date}.`,
+      after: { ...parsed.data, postdated: true },
+    });
+
+    revalidatePath("/payments/pdc");
+    revalidatePath("/payments");
+    redirect("/payments/pdc");
+  }
 
   const applications: { invoice_id: string; amount: number }[] = [];
   for (const [key, raw] of formData.entries()) {
@@ -87,32 +148,18 @@ export async function recordPayment(
     };
   }
 
-  const supabase = await createClient();
-
-  const year = new Date(parsed.data.payment_date).getFullYear();
-  const prefix = `OR-${year}-`;
-  const { data: last } = await supabase
-    .from("payments")
-    .select("payment_no")
-    .eq("company_id", companyId)
-    .ilike("payment_no", `${prefix}%`)
-    .order("payment_no", { ascending: false })
-    .limit(1);
-  const sequence = last?.[0]
-    ? Number(last[0].payment_no.slice(prefix.length)) + 1
-    : 1;
-  const paymentNo = `${prefix}${String(Number.isFinite(sequence) ? sequence : 1).padStart(5, "0")}`;
-
   const { data: payment, error } = await supabase
     .from("payments")
     .insert({
       company_id: companyId,
-      payment_no: paymentNo,
       ...parsed.data,
       reference: parsed.data.reference || null,
       notes: parsed.data.notes || null,
+      // Only meaningful on a cheque, and an empty string is not a date.
+      check_bank: parsed.data.check_bank || null,
+      check_date: parsed.data.check_date || null,
     })
-    .select("id")
+    .select("id, payment_no")
     .single();
 
   if (error) return { error: error.message };
@@ -131,7 +178,7 @@ export async function recordPayment(
     moduleKey: MODULE.payments,
     entityTable: "payments",
     entityId: payment.id,
-    summary: `Recorded ${paymentNo} for ${parsed.data.amount.toFixed(2)} (${parsed.data.payment_mode}), applied to ${applications.length} invoice(s).`,
+    summary: `Recorded ${payment.payment_no} for ${parsed.data.amount.toFixed(2)} (${parsed.data.payment_mode}), applied to ${applications.length} invoice(s).`,
     after: { ...parsed.data, applications },
   });
 
@@ -226,7 +273,7 @@ export async function recordPdc(
       ...parsed.data,
       notes: parsed.data.notes || null,
     })
-    .select("id")
+    .select("id, pdc_no")
     .single();
 
   if (error) {
@@ -243,17 +290,201 @@ export async function recordPdc(
     moduleKey: MODULE.paymentsPdc,
     entityTable: "postdated_checks",
     entityId: data.id,
-    summary: `Recorded cheque ${parsed.data.check_no} (${parsed.data.bank}) for ${parsed.data.amount.toFixed(2)}, maturing ${parsed.data.maturity_date}.`,
+    summary: `Recorded ${data.pdc_no} — cheque ${parsed.data.check_no} (${parsed.data.bank}) for ${parsed.data.amount.toFixed(2)}, maturing ${parsed.data.maturity_date}.`,
     after: parsed.data,
   });
 
   revalidatePath("/payments/pdc");
-  return { success: `Cheque ${parsed.data.check_no} recorded.` };
+  return {
+    success: `${data.pdc_no} recorded for cheque ${parsed.data.check_no}.`,
+  };
 }
 
-export async function setPdcStatus(formData: FormData) {
+/**
+ * Banks a whole slip at once.
+ *
+ * The cashier deposits one slip per bank, so marking them off one cheque at a
+ * time invites a half-finished run where some are recorded and some are not.
+ */
+export async function depositCheques(
+  _prevState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
   const context = await getSessionContext();
-  if (!context || !can(context.permissions, MODULE.paymentsPdc, "edit")) return;
+  if (!context || !can(context.permissions, MODULE.paymentsPdc, "edit")) {
+    return { error: "Banking a slip needs Edit on postdated cheques." };
+  }
+
+  const ids = formData.getAll("chequeIds").map(String).filter(Boolean);
+  if (ids.length === 0) return { error: "No cheques on this slip." };
+
+  const supabase = await createClient();
+  const { data: before } = await supabase
+    .from("postdated_checks")
+    .select("id, pdc_no, check_no, bank, amount, status")
+    .in("id", ids);
+
+  // Only cheques still in the drawer; anything already banked stays as it is.
+  const bankable = (before ?? []).filter(
+    (cheque) => cheque.status === "pending" || cheque.status === "matured",
+  );
+  if (bankable.length === 0) {
+    return { error: "These cheques have already been banked." };
+  }
+
+  const today = new Date().toISOString().slice(0, 10);
+  const { error } = await supabase
+    .from("postdated_checks")
+    .update({ status: "deposited", deposited_at: today })
+    .in(
+      "id",
+      bankable.map((cheque) => cheque.id),
+    );
+  // The maturity guard explains itself; pass its message straight through.
+  if (error) return { error: error.message };
+
+  const total = bankable.reduce((sum, cheque) => sum + Number(cheque.amount), 0);
+
+  await logAudit({
+    action: "update",
+    moduleKey: MODULE.paymentsPdc,
+    entityTable: "postdated_checks",
+    summary: `Deposited ${bankable.length} cheque(s) to ${bankable[0].bank} totalling ${total.toFixed(2)}.`,
+    after: {
+      deposited_at: today,
+      cheques: bankable.map((cheque) => cheque.pdc_no),
+    },
+  });
+
+  revalidatePath("/payments/pdc/deposit-slip");
+  revalidatePath("/payments/pdc");
+  revalidatePath("/dashboard");
+  return {
+    success: `${bankable.length} cheque(s) banked to ${bankable[0].bank}, ${total.toFixed(2)} in total.`,
+  };
+}
+
+/**
+ * Turns a cleared cheque into the collection it always was.
+ *
+ * A cheque only becomes money once the bank has honoured it, so the payment is
+ * created here rather than when the cheque was taken in. The cheque keeps a
+ * link to the payment so the same one can never be collected twice.
+ */
+export async function postChequeCollection(
+  _prevState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  let companyId: string;
+  try {
+    const context = await assertPermission(MODULE.payments, "edit");
+    companyId = context.activeCompany!.companyId;
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+
+  const chequeId = String(formData.get("cheque_id") ?? "");
+  if (!chequeId) return { error: "Missing cheque." };
+
+  const supabase = await createClient();
+  const { data: cheque } = await supabase
+    .from("postdated_checks")
+    .select(
+      "id, company_id, pdc_no, check_no, bank, amount, maturity_date, status, payment_id, tenant_id",
+    )
+    .eq("id", chequeId)
+    .maybeSingle();
+
+  if (!cheque || cheque.company_id !== companyId) {
+    return { error: "Cheque not found." };
+  }
+  if (cheque.status !== "cleared") {
+    return {
+      error:
+        "Only a cleared cheque can be collected. Deposit it and mark it cleared once the bank has honoured it.",
+    };
+  }
+  if (cheque.payment_id) {
+    return { error: "This cheque has already been posted as a collection." };
+  }
+
+  const applications: { invoice_id: string; amount: number }[] = [];
+  for (const [key, raw] of formData.entries()) {
+    if (!key.startsWith("apply:")) continue;
+    const value = String(raw).trim();
+    if (value === "" || Number(value) <= 0) continue;
+    applications.push({
+      invoice_id: key.slice("apply:".length),
+      amount: round2(Number(value)),
+    });
+  }
+
+  if (applications.length === 0) {
+    return { error: "Attach at least one invoice for this cheque to settle." };
+  }
+
+  const chequeAmount = round2(Number(cheque.amount));
+  const applied = round2(applications.reduce((sum, row) => sum + row.amount, 0));
+  if (applied > chequeAmount) {
+    return {
+      error: `You have applied ${applied.toFixed(2)} but the cheque is only ${chequeAmount.toFixed(2)}.`,
+    };
+  }
+
+  const today = new Date().toISOString().slice(0, 10);
+  const { data: payment, error } = await supabase
+    .from("payments")
+    .insert({
+      company_id: companyId,
+      tenant_id: cheque.tenant_id,
+      payment_kind: "payment",
+      payment_mode: "check",
+      payment_date: today,
+      amount: chequeAmount,
+      reference: cheque.check_no,
+      check_bank: cheque.bank,
+      check_date: cheque.maturity_date,
+      notes: `Cleared cheque ${cheque.pdc_no}.`,
+    })
+    .select("id, payment_no")
+    .single();
+
+  if (error) return { error: error.message };
+
+  const { error: applyError } = await supabase
+    .from("payment_applications")
+    .insert(applications.map((row) => ({ payment_id: payment.id, ...row })));
+  if (applyError) return { error: applyError.message };
+
+  const { error: linkError } = await supabase
+    .from("postdated_checks")
+    .update({ payment_id: payment.id })
+    .eq("id", chequeId);
+  if (linkError) return { error: linkError.message };
+
+  await logAudit({
+    action: "create",
+    moduleKey: MODULE.payments,
+    entityTable: "payments",
+    entityId: payment.id,
+    summary: `Collected ${cheque.pdc_no} (cheque ${cheque.check_no}, ${cheque.bank}) as ${payment.payment_no} for ${chequeAmount.toFixed(2)}, applied to ${applications.length} invoice(s).`,
+    after: { cheque: cheque.pdc_no, applications },
+  });
+
+  revalidatePath("/payments/pdc");
+  revalidatePath("/payments");
+  revalidatePath("/dashboard");
+  redirect(`/payments/${payment.id}`);
+}
+
+export async function setPdcStatus(
+  _prevState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const context = await getSessionContext();
+  if (!context || !can(context.permissions, MODULE.paymentsPdc, "edit")) {
+    return { error: "Moving a cheque on needs Edit on postdated cheques." };
+  }
 
   const id = String(formData.get("id") ?? "");
   const status = String(formData.get("status") ?? "");
@@ -262,7 +493,7 @@ export async function setPdcStatus(formData: FormData) {
       status,
     )
   ) {
-    return;
+    return { error: "Unknown status." };
   }
 
   const supabase = await createClient();
@@ -272,6 +503,8 @@ export async function setPdcStatus(formData: FormData) {
     .eq("id", id)
     .single();
 
+  if (!before) return { error: "Cheque not found." };
+
   const { error } = await supabase
     .from("postdated_checks")
     .update({
@@ -280,17 +513,21 @@ export async function setPdcStatus(formData: FormData) {
         status === "deposited" ? new Date().toISOString().slice(0, 10) : null,
     })
     .eq("id", id);
-  if (error) return;
+
+  // The maturity guard explains itself; pass its message straight through.
+  if (error) return { error: error.message };
 
   await logAudit({
     action: "update",
     moduleKey: MODULE.paymentsPdc,
     entityTable: "postdated_checks",
     entityId: id,
-    summary: `Cheque ${before?.check_no ?? id} marked ${status}.`,
-    before: { status: before?.status },
+    summary: `Cheque ${before.check_no} marked ${status}.`,
+    before: { status: before.status },
     after: { status },
   });
 
   revalidatePath("/payments/pdc");
+  revalidatePath("/dashboard");
+  return { success: `Cheque ${before.check_no} marked ${status}.` };
 }
