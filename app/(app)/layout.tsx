@@ -172,6 +172,11 @@ export default async function AppLayout({
   if (can(permissions, MODULE.adminAudit, "view")) {
     administration.push({ href: "/admin/audit", label: "Audit Trail" });
   }
+  // Backups read every table at once, so they are admin-only rather than
+  // gated on a module permission.
+  if (context.isSuperAdmin || context.activeCompany?.isCompanyAdmin) {
+    administration.push({ href: "/admin/backups", label: "Backups" });
+  }
   if (administration.length > 0) {
     groups.push({ group: "Administration", items: administration });
   }

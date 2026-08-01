@@ -7,10 +7,16 @@ import { FormError } from "@/components/ui";
 import { money } from "@/lib/format";
 
 import type { ActionState } from "./actions";
+import { WITHHOLDING_KINDS } from "./constants";
 
 export type VendorOption = { id: string; name: string };
 export type ItemOption = { id: string; name: string; unit_of_measure: string };
-export type RequestOption = { id: string; request_no: string };
+export type RequestOption = {
+  id: string;
+  request_no: string;
+  locationLabel: string;
+};
+export type LocationOption = { id: string; code: string; name: string };
 export type ExpenseAccountOption = { id: string; code: string; name: string };
 
 function Submit({ label }: { label: string }) {
@@ -19,6 +25,42 @@ function Submit({ label }: { label: string }) {
     <button type="submit" className="btn btn-primary" disabled={pending}>
       {pending ? "Working…" : label}
     </button>
+  );
+}
+
+function ResendSubmit() {
+  const { pending } = useFormStatus();
+  return (
+    <button type="submit" className="btn btn-primary btn-sm" disabled={pending}>
+      {pending ? "Sending…" : "Send for approval"}
+    </button>
+  );
+}
+
+/** Recovers a pending supplier whose approval request has gone missing. */
+export function ResendApprovalForm({
+  action,
+  vendorId,
+}: {
+  action: (state: ActionState, formData: FormData) => Promise<ActionState>;
+  vendorId: string;
+}) {
+  const [state, formAction] = useActionState<ActionState, FormData>(action, {});
+
+  return (
+    <form action={formAction} className="flex flex-col items-end gap-1">
+      <input type="hidden" name="id" value={vendorId} />
+      <ResendSubmit />
+      {state.error ? (
+        <p
+          className="text-xs text-right"
+          style={{ color: "var(--danger)", maxWidth: "16rem" }}
+          role="alert"
+        >
+          {state.error}
+        </p>
+      ) : null}
+    </form>
   );
 }
 
@@ -35,12 +77,18 @@ function Result({ state }: { state: ActionState }) {
   );
 }
 
+export type PaymentTermOption = { id: string; name: string; days: number };
+
 export function VendorForm({
   action,
+  terms,
 }: {
   action: (state: ActionState, formData: FormData) => Promise<ActionState>;
+  terms: PaymentTermOption[];
 }) {
   const [state, formAction] = useActionState<ActionState, FormData>(action, {});
+  const [isVatable, setIsVatable] = useState(false);
+
   return (
     <form action={formAction} className="grid gap-4 sm:grid-cols-3">
       <div>
@@ -59,12 +107,22 @@ export function VendorForm({
         <label className="label" htmlFor="vendor-terms">
           Payment terms
         </label>
-        <input
+        <select
           id="vendor-terms"
-          name="payment_terms"
-          className="input"
-          placeholder="30 days"
-        />
+          name="payment_terms_id"
+          className="select"
+          defaultValue=""
+        >
+          <option value="">Not agreed</option>
+          {terms.map((term) => (
+            <option key={term.id} value={term.id}>
+              {/* Most names already say the number; only spell it out when not. */}
+              {term.days > 0 && !term.name.includes(String(term.days))
+                ? `${term.name} — ${term.days} days`
+                : term.name}
+            </option>
+          ))}
+        </select>
       </div>
       <div>
         <label className="label" htmlFor="vendor-contact">
@@ -90,6 +148,54 @@ export function VendorForm({
         </label>
         <input id="vendor-address" name="address" className="input" />
       </div>
+
+      <div>
+        <p className="label">VAT</p>
+        <label
+          className="flex items-start gap-2 text-sm"
+          style={{ cursor: "pointer", paddingTop: "0.5rem" }}
+        >
+          <input
+            type="checkbox"
+            name="is_vatable"
+            className="h-4 w-4 accent-[var(--color-brand-600)]"
+            style={{ marginTop: "0.15rem" }}
+            checked={isVatable}
+            onChange={(event) => setIsVatable(event.currentTarget.checked)}
+          />
+          <span>VAT-registered</span>
+        </label>
+      </div>
+
+      <div className="sm:col-span-2">
+        <label className="label" htmlFor="vendor-withholding">
+          Withholding tax
+        </label>
+        {isVatable ? (
+          <>
+            <select
+              id="vendor-withholding"
+              name="withholding"
+              className="select"
+              defaultValue="none"
+            >
+              {WITHHOLDING_KINDS.map((kind) => (
+                <option key={kind.value} value={kind.value}>
+                  {kind.label}
+                </option>
+              ))}
+            </select>
+            <p className="text-xs muted mt-1">
+              Deducted from what you pay them and remitted to the BIR.
+            </p>
+          </>
+        ) : (
+          <p className="text-sm muted pt-2">
+            Only applies to a VAT-registered supplier.
+          </p>
+        )}
+      </div>
+
       <div className="sm:col-span-3 flex items-center gap-3 flex-wrap">
         <Submit label="Add supplier" />
         <Result state={state} />
@@ -289,10 +395,12 @@ export function PurchaseRequestForm({
   action,
   items,
   expenseAccounts,
+  locations,
 }: {
   action: (state: ActionState, formData: FormData) => Promise<ActionState>;
   items: ItemOption[];
   expenseAccounts: ExpenseAccountOption[];
+  locations: LocationOption[];
 }) {
   const [state, formAction] = useActionState<ActionState, FormData>(action, {});
   const [lines, setLines] = useState<Line[]>([
@@ -304,12 +412,33 @@ export function PurchaseRequestForm({
     <form action={formAction} className="flex flex-col gap-4">
       <div className="grid gap-4 sm:grid-cols-3">
         <div>
+          <label className="label" htmlFor="pr-location">
+            For which property
+          </label>
+          <select
+            id="pr-location"
+            name="location_id"
+            className="select"
+            defaultValue=""
+          >
+            <option value="">Company-wide</option>
+            {locations.map((location) => (
+              <option key={location.id} value={location.id}>
+                {location.code} — {location.name}
+              </option>
+            ))}
+          </select>
+          <p className="text-xs muted mt-1">
+            What the spend is charged against.
+          </p>
+        </div>
+        <div>
           <label className="label" htmlFor="pr-needed">
             Needed by
           </label>
           <input id="pr-needed" name="needed_by" type="date" className="input" />
         </div>
-        <div className="sm:col-span-2">
+        <div>
           <label className="label" htmlFor="pr-justification">
             Why it is needed
           </label>
@@ -344,18 +473,23 @@ export function PurchaseOrderForm({
   items,
   expenseAccounts,
   approvedRequests,
+  locations,
 }: {
   action: (state: ActionState, formData: FormData) => Promise<ActionState>;
   vendors: VendorOption[];
   items: ItemOption[];
   expenseAccounts: ExpenseAccountOption[];
   approvedRequests: RequestOption[];
+  locations: LocationOption[];
 }) {
   const [state, formAction] = useActionState<ActionState, FormData>(action, {});
+  const [requestId, setRequestId] = useState("");
   const [lines, setLines] = useState<Line[]>([
     { ...EMPTY_LINE },
     { ...EMPTY_LINE },
   ]);
+
+  const fromRequest = approvedRequests.find((row) => row.id === requestId);
 
   return (
     <form action={formAction} className="flex flex-col gap-4">
@@ -377,11 +511,17 @@ export function PurchaseOrderForm({
           <label className="label" htmlFor="po-request">
             Against request
           </label>
-          <select id="po-request" name="request_id" className="select" defaultValue="">
+          <select
+            id="po-request"
+            name="request_id"
+            className="select"
+            value={requestId}
+            onChange={(event) => setRequestId(event.currentTarget.value)}
+          >
             <option value="">None — direct order</option>
             {approvedRequests.map((request) => (
               <option key={request.id} value={request.id}>
-                {request.request_no}
+                {request.request_no} · {request.locationLabel}
               </option>
             ))}
           </select>
@@ -392,6 +532,37 @@ export function PurchaseOrderForm({
             Expected delivery
           </label>
           <input id="po-expected" name="expected_date" type="date" className="input" />
+        </div>
+
+        <div>
+          <p className="label">For which property</p>
+          {fromRequest ? (
+            <p className="text-sm pt-2">
+              {fromRequest.locationLabel}
+              <span className="block text-xs muted">
+                Taken from {fromRequest.request_no}.
+              </span>
+            </p>
+          ) : (
+            <>
+              <select
+                id="po-location"
+                name="location_id"
+                className="select"
+                defaultValue=""
+              >
+                <option value="">Company-wide</option>
+                {locations.map((location) => (
+                  <option key={location.id} value={location.id}>
+                    {location.code} — {location.name}
+                  </option>
+                ))}
+              </select>
+              <p className="text-xs muted mt-1">
+                What the spend is charged against.
+              </p>
+            </>
+          )}
         </div>
       </div>
 

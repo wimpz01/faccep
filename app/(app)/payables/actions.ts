@@ -21,6 +21,7 @@ const invoiceSchema = z.object({
   withholding_tax: z.coerce.number().min(0),
   po_id: z.string().uuid().optional().or(z.literal("")),
   job_id: z.string().uuid().optional().or(z.literal("")),
+  location_id: z.string().uuid().optional().or(z.literal("")),
   expense_account_id: z.string().uuid().optional().or(z.literal("")),
   notes: z.string().trim().optional().or(z.literal("")),
 });
@@ -47,6 +48,7 @@ export async function createSupplierInvoice(
     withholding_tax: formData.get("withholding_tax") || 0,
     po_id: formData.get("po_id"),
     job_id: formData.get("job_id"),
+    location_id: formData.get("location_id"),
     expense_account_id: formData.get("expense_account_id"),
     notes: formData.get("notes"),
   });
@@ -60,6 +62,27 @@ export async function createSupplierInvoice(
   if (total < 0) return { error: "Withholding tax exceeds the invoice value." };
 
   const supabase = await createClient();
+
+  // The property follows whatever the bill is raised against, and is only
+  // asked for when the bill stands on its own.
+  let locationId = parsed.data.location_id || null;
+  if (!locationId && parsed.data.po_id) {
+    const { data: order } = await supabase
+      .from("purchase_orders")
+      .select("location_id")
+      .eq("id", parsed.data.po_id)
+      .maybeSingle();
+    locationId = order?.location_id ?? null;
+  }
+  if (!locationId && parsed.data.job_id) {
+    const { data: job } = await supabase
+      .from("maintenance_jobs")
+      .select("location_id")
+      .eq("id", parsed.data.job_id)
+      .maybeSingle();
+    locationId = job?.location_id ?? null;
+  }
+
   const { data, error } = await supabase
     .from("supplier_invoices")
     .insert({
@@ -67,6 +90,7 @@ export async function createSupplierInvoice(
       ...parsed.data,
       po_id: parsed.data.po_id || null,
       job_id: parsed.data.job_id || null,
+      location_id: locationId,
       expense_account_id: parsed.data.expense_account_id || null,
       notes: parsed.data.notes || null,
       total,
@@ -133,7 +157,7 @@ export async function createBillFromOrder(
   const supabase = await createClient();
   const { data: order } = await supabase
     .from("purchase_orders")
-    .select("id, po_no, vendor_id, company_id")
+    .select("id, po_no, vendor_id, company_id, location_id")
     .eq("id", poId)
     .single();
 
@@ -150,6 +174,8 @@ export async function createBillFromOrder(
       company_id: companyId,
       vendor_id: order.vendor_id,
       po_id: poId,
+      // The bill is charged wherever the order was for.
+      location_id: order.location_id,
       invoice_no: invoiceNo,
       invoice_date:
         String(formData.get("invoice_date") ?? "") ||

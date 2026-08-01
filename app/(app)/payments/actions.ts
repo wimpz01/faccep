@@ -477,6 +477,58 @@ export async function postChequeCollection(
   redirect(`/payments/${payment.id}`);
 }
 
+/**
+ * Cancelling a recorded cheque is approval-gated (spec 2).
+ *
+ * The cheque is a claim on the tenant's money that has been written into the
+ * register, so withdrawing it is not something the person holding it should be
+ * able to do alone.
+ */
+export async function requestChequeCancel(
+  _prevState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  try {
+    await assertPermission(MODULE.paymentsPdc, "edit");
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+
+  const id = String(formData.get("id") ?? "");
+  const reason = String(formData.get("reason") ?? "").trim();
+  if (!reason) return { error: "Give a reason for cancelling this cheque." };
+
+  const supabase = await createClient();
+  const { data: cheque } = await supabase
+    .from("postdated_checks")
+    .select("pdc_no, check_no, bank, status")
+    .eq("id", id)
+    .maybeSingle();
+
+  if (!cheque) return { error: "Cheque not found." };
+  if (cheque.status === "cancelled") return { error: "Already cancelled." };
+  if (cheque.status === "deposited" || cheque.status === "cleared") {
+    return {
+      error: `${cheque.pdc_no} has already been banked. Mark it bounced instead of cancelling it.`,
+    };
+  }
+
+  const failure = await requestApproval({
+    moduleKey: MODULE.paymentsPdc,
+    entityTable: "postdated_checks",
+    entityId: id,
+    action: "cancel",
+    reason,
+    summary: `cheque ${cheque.pdc_no} (${cheque.check_no}, ${cheque.bank})`,
+  });
+  if (failure) return { error: failure };
+
+  revalidatePath("/payments/pdc");
+  return {
+    success: `Cancellation requested for ${cheque.pdc_no}. It stays on file until somebody with Approve signs it off.`,
+  };
+}
+
 export async function setPdcStatus(
   _prevState: ActionState,
   formData: FormData,
@@ -494,6 +546,14 @@ export async function setPdcStatus(
     )
   ) {
     return { error: "Unknown status." };
+  }
+
+  // Cancelling goes through the approval queue, never straight from here.
+  if (status === "cancelled") {
+    return {
+      error:
+        "Cancelling a cheque needs approval. Use Cancel on the cheque to raise the request.",
+    };
   }
 
   const supabase = await createClient();

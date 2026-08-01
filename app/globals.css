@@ -39,6 +39,11 @@
   --danger: #dc2626;
   --success: #15803d;
   --shadow-card: 0 1px 2px rgb(15 23 42 / 0.06), 0 1px 3px rgb(15 23 42 / 0.1);
+
+  /* Occupancy meter: one hue, the filled share darker than its track. Both
+     steps clear the 2:1 contrast floor against this surface. */
+  --occupancy-track: var(--color-brand-300);
+  --occupancy-fill: var(--color-brand-600);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -53,6 +58,11 @@
     --danger: #f87171;
     --success: #4ade80;
     --shadow-card: 0 1px 2px rgb(0 0 0 / 0.4);
+
+    /* Dark gets its own steps rather than the light pair flipped: the fill has
+       to stay the lighter of the two so it still reads as the value. */
+    --occupancy-track: var(--color-brand-600);
+    --occupancy-fill: var(--color-brand-300);
   }
 }
 

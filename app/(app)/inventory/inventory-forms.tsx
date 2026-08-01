@@ -64,6 +64,84 @@ export function CategoryForm({
   );
 }
 
+/**
+ * Bulk import from a spreadsheet.
+ *
+ * The file is read in the browser and posted as text, which keeps the action a
+ * plain form submission rather than a multipart upload.
+ */
+export function ImportItemsForm({
+  action,
+}: {
+  action: (state: ActionState, formData: FormData) => Promise<ActionState>;
+}) {
+  const [state, formAction] = useActionState<ActionState, FormData>(action, {});
+  const [csv, setCsv] = useState("");
+  const [fileName, setFileName] = useState("");
+
+  return (
+    <form action={formAction} className="flex flex-col gap-3">
+      <input type="hidden" name="csv" value={csv} />
+
+      <div className="flex items-end gap-3 flex-wrap">
+        <div>
+          <label className="label" htmlFor="import-file">
+            Spreadsheet (.csv)
+          </label>
+          <input
+            id="import-file"
+            type="file"
+            accept=".csv,text/csv"
+            className="input"
+            style={{ maxWidth: "20rem" }}
+            onChange={async (event) => {
+              const file = event.currentTarget.files?.[0];
+              if (!file) return;
+              setFileName(file.name);
+              setCsv(await file.text());
+            }}
+          />
+        </div>
+        <a
+          href="/inventory/export?template=1"
+          className="btn btn-secondary btn-sm"
+        >
+          Download template
+        </a>
+      </div>
+
+      <div>
+        <label className="label" htmlFor="import-csv">
+          {fileName ? `From ${fileName} — check it, then import` : "Or paste the rows"}
+        </label>
+        <textarea
+          id="import-csv"
+          className="textarea"
+          rows={fileName ? 6 : 3}
+          placeholder={"name,category,unit_of_measure,reorder_level,unit_cost\nPortland cement 40kg,Construction,bag,20,285"}
+          value={csv}
+          onChange={(event) => setCsv(event.currentTarget.value)}
+        />
+        <p className="text-xs muted mt-1">
+          First row is the header. <strong>name</strong> and{" "}
+          <strong>unit_of_measure</strong> are required; category is created if it
+          is new. Codes are issued automatically, so leave sku out.
+        </p>
+      </div>
+
+      <div className="flex items-center gap-3 flex-wrap">
+        <Submit label="Import items" />
+        <FormError message={state.error} />
+        {state.success ? (
+          <p className="text-sm" style={{ color: "var(--success)" }}>
+            {state.success}
+          </p>
+        ) : null}
+      </div>
+    </form>
+  );
+}
+
 export function ItemForm({
   action,
   categories,
@@ -94,10 +172,8 @@ export function ItemForm({
         </select>
       </div>
       <div>
-        <label className="label" htmlFor="item-sku">
-          SKU
-        </label>
-        <input id="item-sku" name="sku" className="input" />
+        <p className="label">SKU</p>
+        <p className="text-sm muted pt-2">Issued on save.</p>
       </div>
       <div>
         <label className="label" htmlFor="item-uom">

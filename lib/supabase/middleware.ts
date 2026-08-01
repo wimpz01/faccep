@@ -3,7 +3,16 @@ import { NextResponse, type NextRequest } from "next/server";
 
 type CookieToSet = { name: string; value: string; options: CookieOptions };
 
-const PUBLIC_PATHS = ["/login", "/auth"];
+/**
+ * Paths the session redirect leaves alone.
+ *
+ * /api is here because those routes are called by machines, not browsers -- a
+ * scheduler hitting the backup endpoint would follow a redirect to the login
+ * page and silently do nothing. Each API route authenticates itself instead:
+ * the cron endpoint on a shared secret, and nothing under /api may rely on the
+ * middleware having checked a session.
+ */
+const PUBLIC_PATHS = ["/login", "/auth", "/api"];
 
 export async function updateSession(request: NextRequest) {
   let response = NextResponse.next({ request });
@@ -39,6 +48,20 @@ export async function updateSession(request: NextRequest) {
   const isPublic = PUBLIC_PATHS.some(
     (path) => pathname === path || pathname.startsWith(`${path}/`),
   );
+
+  /**
+   * Only document navigations are redirected here.
+   *
+   * A Server Action posts back to the URL of the page it was invoked from, so
+   * signing in is a POST to /login. Answering that with a redirect hands the
+   * client an HTTP redirect where it expects an action result, and Next reports
+   * it as "An unexpected response was received from the server" -- with the
+   * stack pointing at the component that binds the action, not at the cause.
+   *
+   * Actions are let through and left to requireSession() inside the action,
+   * whose redirect() is encoded as a proper action response.
+   */
+  if (request.method !== "GET") return response;
 
   if (!user && !isPublic) {
     const url = request.nextUrl.clone();

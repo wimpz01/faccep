@@ -57,6 +57,52 @@ export function EmptyState({ children }: { children: ReactNode }) {
   return <p className="empty-state">{children}</p>;
 }
 
+/**
+ * Section tabs within a page.
+ *
+ * Each tab is a link rather than client state, so a tab can be linked to,
+ * bookmarked and reloaded, and the page stays a server component.
+ */
+export function TabBar({
+  tabs,
+  active,
+}: {
+  tabs: { value: string; label: string; href: string; count?: number }[];
+  active: string;
+}) {
+  return (
+    <div
+      className="flex gap-1 flex-wrap border-b mb-6"
+      style={{ borderColor: "var(--border)" }}
+    >
+      {tabs.map((tab) => {
+        const on = tab.value === active;
+        return (
+          <a
+            key={tab.value}
+            href={tab.href}
+            className="text-sm font-medium px-4 py-2.5"
+            style={{
+              color: on ? "var(--color-brand-600)" : "var(--text)",
+              borderBottom: on
+                ? "2px solid var(--color-brand-600)"
+                : "2px solid transparent",
+              marginBottom: "-1px",
+            }}
+          >
+            {tab.label}
+            {tab.count !== undefined ? (
+              <span className="ml-1.5 text-xs muted tabular-nums">
+                {tab.count}
+              </span>
+            ) : null}
+          </a>
+        );
+      })}
+    </div>
+  );
+}
+
 export function StatTile({
   label,
   value,

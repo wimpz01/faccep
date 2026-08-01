@@ -7,9 +7,9 @@ import { formatDate, money } from "@/lib/format";
 import { MODULE, can } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
 
-import { recordPdc, setPdcStatus } from "../actions";
+import { recordPdc, requestChequeCancel, setPdcStatus } from "../actions";
 import { PdcForm } from "../payment-forms";
-import { ChequeStatusActions } from "./pdc-status-forms";
+import { ChequeCancelRequest, ChequeStatusActions } from "./pdc-status-forms";
 
 export const metadata: Metadata = { title: "Postdated cheques" };
 
@@ -34,13 +34,13 @@ type PdcRow = {
  * cheque: it is not matured until its date, and it cannot be banked before
  * then either. The database refuses both regardless, so this only keeps the
  * button from being offered.
+ *
+ * Cancelling is absent by design -- it goes through the approval queue and is
+ * offered separately.
  */
 function nextStatuses(status: string, hasMatured: boolean) {
   const options: Record<string, { value: string; label: string }[]> = {
-    pending: [
-      ...(hasMatured ? [{ value: "matured", label: "Mark matured" }] : []),
-      { value: "cancelled", label: "Cancel" },
-    ],
+    pending: hasMatured ? [{ value: "matured", label: "Mark matured" }] : [],
     matured: [
       ...(hasMatured ? [{ value: "deposited", label: "Mark deposited" }] : []),
       { value: "bounced", label: "Mark bounced" },
@@ -56,13 +56,19 @@ function nextStatuses(status: string, hasMatured: boolean) {
   return options[status] ?? [];
 }
 
+/** Cancelling only makes sense while the cheque is still in the drawer. */
+function mayRequestCancel(status: string) {
+  return status === "pending" || status === "matured";
+}
+
 export default async function PdcPage() {
   const context = await requirePermission(MODULE.paymentsPdc, "view");
   const companyId = context.activeCompany!.companyId;
   const canEdit = can(context.permissions, MODULE.paymentsPdc, "edit");
 
   const supabase = await createClient();
-  const [{ data: cheques }, { data: tenants }] = await Promise.all([
+  const [{ data: cheques }, { data: tenants }, { data: pendingCancels }] =
+    await Promise.all([
     supabase
       .from("postdated_checks")
       .select(
@@ -71,12 +77,23 @@ export default async function PdcPage() {
       .eq("company_id", companyId)
       .order("maturity_date")
       .returns<PdcRow[]>(),
-    supabase
-      .from("tenants")
-      .select("id, company_name")
-      .eq("company_id", companyId)
-      .order("company_name"),
-  ]);
+      supabase
+        .from("tenants")
+        .select("id, company_name")
+        .eq("company_id", companyId)
+        .order("company_name"),
+      supabase
+        .from("approval_requests")
+        .select("entity_id")
+        .eq("company_id", companyId)
+        .eq("entity_table", "postdated_checks")
+        .eq("action", "cancel")
+        .eq("status", "pending"),
+    ]);
+
+  const cancelPending = new Set(
+    (pendingCancels ?? []).map((row) => row.entity_id as string),
+  );
 
   const rows = cheques ?? [];
   const today = new Date().toISOString().slice(0, 10);
@@ -273,6 +290,14 @@ export default async function PdcPage() {
                               chequeId={cheque.id}
                               options={nextStatuses(cheque.status, hasMatured)}
                             />
+                            {cancelPending.has(cheque.id) ? (
+                              <span className="badge">cancel awaiting approval</span>
+                            ) : mayRequestCancel(cheque.status) ? (
+                              <ChequeCancelRequest
+                                action={requestChequeCancel}
+                                chequeId={cheque.id}
+                              />
+                            ) : null}
                           </div>
                         </td>
                       ) : null}

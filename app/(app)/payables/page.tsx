@@ -21,6 +21,7 @@ type BillRow = {
   id: string;
   invoice_no: string;
   bill_no: string;
+  locations: { code: string; name: string } | null;
   vendor_id: string;
   invoice_date: string;
   due_date: string;
@@ -58,11 +59,12 @@ export default async function PayablesPage() {
     { data: vouchers },
     { data: vendors },
     { data: expenseAccounts },
+    { data: locations },
   ] = await Promise.all([
     supabase
       .from("supplier_invoices")
       .select(
-        "id, invoice_no, bill_no, vendor_id, invoice_date, due_date, amount, vat_amount, withholding_tax, total, amount_paid, status, vendors(name), maintenance_jobs(job_no, job_kind)",
+        "id, invoice_no, bill_no, vendor_id, invoice_date, due_date, amount, vat_amount, withholding_tax, total, amount_paid, status, vendors(name), locations(code, name), maintenance_jobs(job_no, job_kind)",
       )
       .eq("company_id", companyId)
       .order("due_date")
@@ -79,9 +81,9 @@ export default async function PayablesPage() {
       .returns<VoucherRow[]>(),
     supabase
       .from("vendors")
-      .select("id, name")
+      .select("id, name, is_vatable, withholding")
       .eq("company_id", companyId)
-      .eq("is_active", true)
+      .eq("status", "approved")
       .order("name"),
     supabase
       .from("chart_of_accounts")
@@ -90,10 +92,43 @@ export default async function PayablesPage() {
       .eq("account_type", "expense")
       .eq("is_active", true)
       .order("code"),
+    supabase
+      .from("locations")
+      .select("id, code, name")
+      .eq("company_id", companyId)
+      .eq("is_active", true)
+      .order("code"),
   ]);
 
   const rows = bills ?? [];
   const today = new Date().toISOString().slice(0, 10);
+
+  // Where the money actually went. Bills with no property are grouped rather
+  // than dropped, so the rows always add up to the total billed.
+  const propertyTotals = new Map<
+    string,
+    { key: string; label: string; count: number; billed: number; owing: number }
+  >();
+  for (const bill of rows) {
+    if (bill.status === "cancelled") continue;
+    const key = bill.locations ? bill.locations.code : "—";
+    const entry = propertyTotals.get(key) ?? {
+      key,
+      label: bill.locations
+        ? `${bill.locations.code} — ${bill.locations.name}`
+        : "Company-wide",
+      count: 0,
+      billed: 0,
+      owing: 0,
+    };
+    entry.count += 1;
+    entry.billed += Number(bill.total);
+    entry.owing += Number(bill.total) - Number(bill.amount_paid);
+    propertyTotals.set(key, entry);
+  }
+  const byProperty = [...propertyTotals.values()].sort((a, b) =>
+    b.billed - a.billed,
+  );
 
   const open: OpenBill[] = rows
     .filter((bill) => bill.status === "open" || bill.status === "partially_paid")
@@ -150,6 +185,7 @@ export default async function PayablesPage() {
               action={createSupplierInvoice}
               vendors={vendors ?? []}
               expenseAccounts={expenseAccounts ?? []}
+              locations={locations ?? []}
             />
           </Card>
         </div>
@@ -163,6 +199,55 @@ export default async function PayablesPage() {
               vendors={vendors ?? []}
               bills={open}
             />
+          </Card>
+        </div>
+      ) : null}
+
+      {byProperty.length > 0 ? (
+        <div className="mb-6">
+          <Card
+            title="Spend by property"
+            description="Billed by suppliers, charged to the property the purchase was raised for."
+            bodyClassName=""
+          >
+            <div className="table-scroll">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Property</th>
+                    <th className="text-right">Bills</th>
+                    <th className="text-right">Billed</th>
+                    <th className="text-right">Still owing</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {byProperty.map((row) => (
+                    <tr key={row.key}>
+                      <td className="text-sm">{row.label}</td>
+                      <td className="text-right tabular-nums">{row.count}</td>
+                      <td className="text-right tabular-nums">
+                        {money(row.billed)}
+                      </td>
+                      <td className="text-right tabular-nums">
+                        {money(row.owing)}
+                      </td>
+                    </tr>
+                  ))}
+                  <tr>
+                    <td className="font-semibold">All properties</td>
+                    <td className="text-right tabular-nums font-semibold">
+                      {rows.length}
+                    </td>
+                    <td className="text-right tabular-nums font-semibold">
+                      {money(byProperty.reduce((sum, row) => sum + row.billed, 0))}
+                    </td>
+                    <td className="text-right tabular-nums font-semibold">
+                      {money(byProperty.reduce((sum, row) => sum + row.owing, 0))}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           </Card>
         </div>
       ) : null}
@@ -198,6 +283,10 @@ export default async function PayablesPage() {
                           </span>
                           <p className="text-xs muted">
                             Supplier ref. {bill.invoice_no}
+                            {" · "}
+                            {bill.locations
+                              ? bill.locations.code
+                              : "Company-wide"}
                           </p>
                           {bill.maintenance_jobs?.job_no ? (
                             <p className="text-xs muted">

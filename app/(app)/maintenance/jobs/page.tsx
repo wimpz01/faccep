@@ -54,7 +54,7 @@ export default async function JobsPage() {
       .from("vendors")
       .select("id, name")
       .eq("company_id", companyId)
-      .eq("is_active", true)
+      .eq("status", "approved")
       .order("name"),
   ]);
 

@@ -43,10 +43,11 @@ export async function decideApproval(
     return { error: (error as Error).message };
   }
 
-  if (decision === "approved") {
-    const failure = await applyEffect(request);
-    if (failure) return { error: failure };
-  }
+  const failure =
+    decision === "approved"
+      ? await applyEffect(request)
+      : await applyRejection(request);
+  if (failure) return { error: failure };
 
   const { error } = await supabase
     .from("approval_requests")
@@ -72,12 +73,32 @@ export async function decideApproval(
   revalidatePath("/approvals");
   revalidatePath("/billing/invoices");
   revalidatePath("/payments");
+  revalidatePath("/purchasing/vendors");
   return {
     success:
       decision === "approved"
         ? "Approved and applied."
-        : "Rejected. Nothing was changed.",
+        : "Rejected.",
   };
+}
+
+/**
+ * What a rejection changes, where it changes anything.
+ *
+ * Turning down an invoice cancellation or a payment void leaves the record
+ * exactly as it was -- the request simply fails. A new supplier is different:
+ * the decision is about the supplier themselves, so it has to be recorded on
+ * them or they would sit pending forever.
+ */
+async function applyRejection(request: PendingRequest): Promise<string | null> {
+  if (request.entity_table !== "vendors") return null;
+
+  const supabase = await createClient();
+  const { error } = await supabase
+    .from("vendors")
+    .update({ status: "rejected" })
+    .eq("id", request.entity_id);
+  return error?.message ?? null;
 }
 
 type PendingRequest = {
@@ -114,6 +135,25 @@ async function applyEffect(request: PendingRequest): Promise<string | null> {
       })
       .eq("id", request.entity_id);
     // The payments_settle trigger reopens every invoice the payment touched.
+    return error?.message ?? null;
+  }
+
+  if (request.entity_table === "vendors" && request.action === "approve") {
+    const { error } = await supabase
+      .from("vendors")
+      .update({ status: "approved" })
+      .eq("id", request.entity_id);
+    return error?.message ?? null;
+  }
+
+  if (request.entity_table === "postdated_checks" && request.action === "cancel") {
+    const { error } = await supabase
+      .from("postdated_checks")
+      .update({
+        status: "cancelled",
+        notes: request.reason,
+      })
+      .eq("id", request.entity_id);
     return error?.message ?? null;
   }
 

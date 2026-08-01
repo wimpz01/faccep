@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState } from "react";
+import { useActionState, useState } from "react";
 import { useFormStatus } from "react-dom";
 
 import type { ActionState } from "../actions";
@@ -44,6 +44,82 @@ export function ChequeStatusActions({
         {options.map((option) => (
           <StatusSubmit key={option.value} option={option} />
         ))}
+      </div>
+      {state.error ? (
+        <p
+          className="text-xs text-right"
+          style={{ color: "var(--danger)", maxWidth: "18rem" }}
+          role="alert"
+        >
+          {state.error}
+        </p>
+      ) : null}
+    </form>
+  );
+}
+
+function CancelSubmit() {
+  const { pending } = useFormStatus();
+  return (
+    <button type="submit" className="btn btn-danger btn-sm" disabled={pending}>
+      {pending ? "Requesting…" : "Request cancel"}
+    </button>
+  );
+}
+
+/**
+ * Cancelling is approval-gated, so it asks for a reason rather than acting on
+ * the click. The reason is what the approver sees in the queue.
+ */
+export function ChequeCancelRequest({
+  action,
+  chequeId,
+}: {
+  action: (state: ActionState, formData: FormData) => Promise<ActionState>;
+  chequeId: string;
+}) {
+  const [state, formAction] = useActionState<ActionState, FormData>(action, {});
+  const [open, setOpen] = useState(false);
+
+  if (state.success) {
+    return (
+      <p className="text-xs text-right" style={{ maxWidth: "18rem" }}>
+        <span className="badge">cancel requested</span>
+      </p>
+    );
+  }
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        className="btn btn-secondary btn-sm"
+        onClick={() => setOpen(true)}
+      >
+        Cancel…
+      </button>
+    );
+  }
+
+  return (
+    <form action={formAction} className="flex flex-col items-end gap-1">
+      <input type="hidden" name="id" value={chequeId} />
+      <input
+        name="reason"
+        className="input"
+        style={{ maxWidth: "16rem" }}
+        placeholder="Why is it being cancelled?"
+        required
+      />
+      <div className="inline-flex gap-1">
+        <button
+          type="button"
+          className="btn btn-secondary btn-sm"
+          onClick={() => setOpen(false)}
+        >
+          Back
+        </button>
+        <CancelSubmit />
       </div>
       {state.error ? (
         <p

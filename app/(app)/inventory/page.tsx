@@ -1,14 +1,26 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 
-import { Card, EmptyState, PageHeader, StatTile, formatDateTime } from "@/components/ui";
+import {
+  Card,
+  EmptyState,
+  PageHeader,
+  StatTile,
+  TabBar,
+  formatDateTime,
+} from "@/components/ui";
 import { requirePermission } from "@/lib/auth";
 import { money } from "@/lib/format";
 import { MODULE, can } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
 
-import { createCategory, createItem, recordMovement } from "./actions";
-import { CategoryForm, ItemForm, MovementForm } from "./inventory-forms";
+import { createCategory, createItem, importItems, recordMovement } from "./actions";
+import {
+  CategoryForm,
+  ImportItemsForm,
+  ItemForm,
+  MovementForm,
+} from "./inventory-forms";
 
 export const metadata: Metadata = { title: "Inventory" };
 
@@ -23,11 +35,31 @@ type ItemRow = {
   inventory_categories: { name: string } | null;
 };
 
-export default async function InventoryPage() {
+type CategoryRow = {
+  id: string;
+  name: string;
+  inventory_items: { id: string }[];
+};
+
+const TAB_ITEMS = "items";
+const TAB_MOVEMENT = "movement";
+const TAB_CATEGORIES = "categories";
+
+export default async function InventoryPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ tab?: string; add?: string }>;
+}) {
+  const { tab, add } = await searchParams;
   const context = await requirePermission(MODULE.inventoryItems, "view");
   const companyId = context.activeCompany!.companyId;
   const canEditItems = can(context.permissions, MODULE.inventoryItems, "edit");
   const canMove = can(context.permissions, MODULE.inventoryMovements, "edit");
+
+  const active = [TAB_ITEMS, TAB_MOVEMENT, TAB_CATEGORIES].includes(tab ?? "")
+    ? (tab as string)
+    : TAB_ITEMS;
+  const addOpen = add === "1" && canEditItems;
 
   const supabase = await createClient();
   const [{ data: items }, { data: categories }, { data: movements }] =
@@ -43,9 +75,10 @@ export default async function InventoryPage() {
         .returns<ItemRow[]>(),
       supabase
         .from("inventory_categories")
-        .select("id, name")
+        .select("id, name, inventory_items(id)")
         .eq("company_id", companyId)
-        .order("name"),
+        .order("name")
+        .returns<CategoryRow[]>(),
       supabase
         .from("inventory_movements")
         .select(
@@ -83,9 +116,22 @@ export default async function InventoryPage() {
         title="Inventory"
         description="Stock on hand is the sum of the movement ledger — it is never typed in directly."
         action={
-          <Link href="/inventory/tools" className="btn btn-secondary btn-sm">
-            Tools & equipment
-          </Link>
+          <div className="flex gap-2 flex-wrap">
+            {canEditItems ? (
+              <Link
+                href={addOpen ? "/inventory" : "/inventory?add=1"}
+                className={addOpen ? "btn btn-secondary btn-sm" : "btn btn-primary btn-sm"}
+              >
+                {addOpen ? "Close" : "Add new item"}
+              </Link>
+            ) : null}
+            <a href="/inventory/export" className="btn btn-secondary btn-sm">
+              Export CSV
+            </a>
+            <Link href="/inventory/tools" className="btn btn-secondary btn-sm">
+              Tools &amp; equipment
+            </Link>
+          </div>
         }
       />
 
@@ -104,19 +150,52 @@ export default async function InventoryPage() {
         />
       </div>
 
-      {canMove ? (
-        <div className="mb-6">
+      {addOpen ? (
+        <div className="grid gap-4 lg:grid-cols-2 mb-6">
           <Card
-            title="Record a stock movement"
-            description="Returns put unused material back on the shelf, which is what stops leftovers going missing."
+            title="Add an item"
+            description="One at a time. The code is issued on save."
           >
-            <MovementForm action={recordMovement} items={rows} />
+            <ItemForm action={createItem} categories={categories ?? []} />
+          </Card>
+          <Card
+            title="Import a list"
+            description="Many at once from a spreadsheet, instead of typing them in one by one."
+          >
+            <ImportItemsForm action={importItems} />
           </Card>
         </div>
       ) : null}
 
-      <div className="mb-6">
-        <Card title="Stock on hand" bodyClassName="">
+      <TabBar
+        active={active}
+        tabs={[
+          {
+            value: TAB_ITEMS,
+            label: "Item list",
+            href: "/inventory",
+            count: rows.length,
+          },
+          {
+            value: TAB_MOVEMENT,
+            label: "Record movement",
+            href: `/inventory?tab=${TAB_MOVEMENT}`,
+          },
+          {
+            value: TAB_CATEGORIES,
+            label: "Categories",
+            href: `/inventory?tab=${TAB_CATEGORIES}`,
+            count: (categories ?? []).length,
+          },
+        ]}
+      />
+
+      {active === TAB_ITEMS ? (
+        <Card
+          title="Item list"
+          description="Everything on file. Open an item to see what it cost, who supplied it and where it went."
+          bodyClassName=""
+        >
           {rows.length > 0 ? (
             <div className="table-scroll">
               <table className="table">
@@ -138,9 +217,15 @@ export default async function InventoryPage() {
                     return (
                       <tr key={item.id}>
                         <td>
-                          <span className="font-medium text-sm">{item.name}</span>
+                          <Link
+                            href={`/inventory/${item.id}`}
+                            className="font-medium text-sm"
+                            style={{ color: "var(--color-brand-600)" }}
+                          >
+                            {item.name}
+                          </Link>
                           {item.sku ? (
-                            <p className="text-xs muted">{item.sku}</p>
+                            <p className="text-xs muted tabular-nums">{item.sku}</p>
                           ) : null}
                         </td>
                         <td className="text-xs">
@@ -170,29 +255,66 @@ export default async function InventoryPage() {
               </table>
             </div>
           ) : (
-            <EmptyState>No stock items yet.</EmptyState>
+            <EmptyState>
+              No stock items yet. Use <strong>Add new item</strong> above.
+            </EmptyState>
           )}
         </Card>
-      </div>
+      ) : null}
 
-      {canEditItems ? (
-        <div className="grid gap-4 lg:grid-cols-2 mb-6">
-          <Card title="Add an item">
-            <ItemForm action={createItem} categories={categories ?? []} />
-          </Card>
-          <Card
-            title="Categories"
-            description={
-              (categories ?? []).map((category) => category.name).join(", ") ||
-              "None yet."
-            }
-          >
-            <CategoryForm action={createCategory} />
+      {active === TAB_CATEGORIES ? (
+        <div className="grid gap-4 lg:grid-cols-2">
+          {canEditItems ? (
+            <Card
+              title="Add a category"
+              description="Groups items on the list and in reports."
+            >
+              <CategoryForm action={createCategory} />
+            </Card>
+          ) : null}
+          <Card title="Categories" bodyClassName="">
+            {(categories ?? []).length > 0 ? (
+              <div className="table-scroll">
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th>Category</th>
+                      <th className="text-right">Items</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(categories ?? []).map((category) => (
+                      <tr key={category.id}>
+                        <td className="text-sm">{category.name}</td>
+                        <td className="text-right tabular-nums">
+                          {(category.inventory_items ?? []).length}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <EmptyState>No categories yet.</EmptyState>
+            )}
           </Card>
         </div>
       ) : null}
 
-      <Card title="Recent movements" bodyClassName="">
+      {active === TAB_MOVEMENT ? (
+        <>
+          {canMove ? (
+            <div className="mb-6">
+              <Card
+                title="Record a stock movement"
+                description="Returns put unused material back on the shelf, which is what stops leftovers going missing."
+              >
+                <MovementForm action={recordMovement} items={rows} />
+              </Card>
+            </div>
+          ) : null}
+
+          <Card title="Recent movements" bodyClassName="">
         {movements && movements.length > 0 ? (
           <div className="table-scroll">
             <table className="table">
@@ -233,10 +355,12 @@ export default async function InventoryPage() {
               </tbody>
             </table>
           </div>
-        ) : (
-          <EmptyState>No movements recorded yet.</EmptyState>
-        )}
-      </Card>
+            ) : (
+              <EmptyState>No movements recorded yet.</EmptyState>
+            )}
+          </Card>
+        </>
+      ) : null}
     </>
   );
 }

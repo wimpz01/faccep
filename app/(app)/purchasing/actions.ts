@@ -14,6 +14,97 @@ import { createClient } from "@/lib/supabase/server";
 export type ActionState = { error?: string; success?: string };
 
 // ---------------------------------------------------------------------------
+// Payment terms
+// ---------------------------------------------------------------------------
+
+export async function createPaymentTerm(
+  _prevState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  let companyId: string;
+  try {
+    const context = await assertPermission(MODULE.purchasingVendors, "edit");
+    companyId = context.activeCompany!.companyId;
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+
+  const name = String(formData.get("name") ?? "").trim();
+  const days = Number(formData.get("days") ?? 0);
+
+  if (name.length < 2) return { error: "Give the term a name." };
+  if (!Number.isInteger(days) || days < 0) {
+    return { error: "Days must be a whole number, zero or more." };
+  }
+
+  const supabase = await createClient();
+  const { error } = await supabase
+    .from("payment_terms")
+    .insert({ company_id: companyId, name, days, sort_order: days });
+
+  if (error) {
+    return {
+      error:
+        error.code === "23505" ? "That term already exists." : error.message,
+    };
+  }
+
+  await logAudit({
+    action: "create",
+    moduleKey: MODULE.purchasingVendors,
+    entityTable: "payment_terms",
+    summary: `Added payment term "${name}" (${days} day(s)).`,
+    after: { name, days },
+  });
+
+  revalidatePath("/purchasing/terms");
+  revalidatePath("/purchasing/vendors");
+  return { success: `"${name}" added.` };
+}
+
+/** Retires a term or brings it back. Suppliers already on it keep it. */
+export async function setPaymentTermActive(
+  _prevState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  try {
+    await assertPermission(MODULE.purchasingVendors, "edit");
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+
+  const id = String(formData.get("id") ?? "");
+  const active = formData.get("active") === "true";
+
+  const supabase = await createClient();
+  const { data: before } = await supabase
+    .from("payment_terms")
+    .select("name")
+    .eq("id", id)
+    .maybeSingle();
+  if (!before) return { error: "Term not found." };
+
+  const { error } = await supabase
+    .from("payment_terms")
+    .update({ is_active: active })
+    .eq("id", id);
+  if (error) return { error: error.message };
+
+  await logAudit({
+    action: "update",
+    moduleKey: MODULE.purchasingVendors,
+    entityTable: "payment_terms",
+    entityId: id,
+    summary: `Payment term "${before.name}" ${active ? "brought back" : "retired"}.`,
+    after: { is_active: active },
+  });
+
+  revalidatePath("/purchasing/terms");
+  revalidatePath("/purchasing/vendors");
+  return { success: `"${before.name}" ${active ? "is available again" : "retired"}.` };
+}
+
+// ---------------------------------------------------------------------------
 // Vendors
 // ---------------------------------------------------------------------------
 
@@ -24,7 +115,8 @@ const vendorSchema = z.object({
   contact_person: z.string().trim().optional().or(z.literal("")),
   contact_number: z.string().trim().optional().or(z.literal("")),
   email: z.string().trim().email("Enter a valid email.").optional().or(z.literal("")),
-  payment_terms: z.string().trim().optional().or(z.literal("")),
+  payment_terms_id: z.string().uuid().optional().or(z.literal("")),
+  withholding: z.enum(["none", "goods", "services"]).default("none"),
 });
 
 export async function createVendor(
@@ -46,9 +138,20 @@ export async function createVendor(
     contact_person: formData.get("contact_person"),
     contact_number: formData.get("contact_number"),
     email: formData.get("email"),
-    payment_terms: formData.get("payment_terms"),
+    payment_terms_id: formData.get("payment_terms_id"),
+    withholding: formData.get("withholding") || "none",
   });
   if (!parsed.success) return { error: parsed.error.issues[0].message };
+
+  const isVatable = formData.get("is_vatable") === "on";
+  // The database refuses the pair too; catching it here gives a plain message
+  // instead of a constraint name.
+  if (!isVatable && parsed.data.withholding !== "none") {
+    return {
+      error:
+        "Withholding tax only applies to a VAT-registered supplier. Tick VAT-registered, or set withholding to none.",
+    };
+  }
 
   const supabase = await createClient();
   const values = Object.fromEntries(
@@ -57,8 +160,14 @@ export async function createVendor(
 
   const { data, error } = await supabase
     .from("vendors")
-    .insert({ company_id: companyId, ...values, name: parsed.data.name })
-    .select("id")
+    .insert({
+      company_id: companyId,
+      ...values,
+      name: parsed.data.name,
+      is_vatable: isVatable,
+      withholding: parsed.data.withholding,
+    })
+    .select("id, vendor_no")
     .single();
 
   if (error) {
@@ -72,12 +181,74 @@ export async function createVendor(
     moduleKey: MODULE.purchasingVendors,
     entityTable: "vendors",
     entityId: data.id,
-    summary: `Added supplier "${parsed.data.name}".`,
+    summary: `Added supplier ${data.vendor_no} "${parsed.data.name}" (pending approval).`,
     after: parsed.data,
   });
 
+  // A supplier is unusable until signed off, so the request goes up straight
+  // away rather than waiting for someone to remember to submit it.
+  const failure = await requestApproval({
+    moduleKey: MODULE.purchasingVendors,
+    entityTable: "vendors",
+    entityId: data.id,
+    action: "approve",
+    reason: `New supplier ${data.vendor_no} "${parsed.data.name}"`,
+    summary: `supplier ${data.vendor_no}`,
+  });
+  if (failure) return { error: failure };
+
   revalidatePath("/purchasing/vendors");
-  return { success: `"${parsed.data.name}" added.` };
+  revalidatePath("/approvals");
+  return {
+    success: `${data.vendor_no} — "${parsed.data.name}" added. It cannot be used until approved.`,
+  };
+}
+
+/**
+ * Puts a pending supplier back in the approvals queue.
+ *
+ * A supplier is normally queued the moment it is created, so this only matters
+ * when the request has gone missing -- a restore from backup, a queue tidied
+ * too enthusiastically. Without it the supplier is stranded: unusable because
+ * it is pending, and unapprovable because there is nothing to decide.
+ */
+export async function resendVendorApproval(
+  _prevState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  try {
+    await assertPermission(MODULE.purchasingVendors, "edit");
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+
+  const id = String(formData.get("id") ?? "");
+  const supabase = await createClient();
+
+  const { data: vendor } = await supabase
+    .from("vendors")
+    .select("id, vendor_no, name, status")
+    .eq("id", id)
+    .maybeSingle();
+
+  if (!vendor) return { error: "Supplier not found." };
+  if (vendor.status !== "pending") {
+    return { error: `${vendor.vendor_no} has already been decided.` };
+  }
+
+  const failure = await requestApproval({
+    moduleKey: MODULE.purchasingVendors,
+    entityTable: "vendors",
+    entityId: id,
+    action: "approve",
+    reason: `New supplier ${vendor.vendor_no} "${vendor.name}"`,
+    summary: `supplier ${vendor.vendor_no}`,
+  });
+  if (failure) return { error: failure };
+
+  revalidatePath("/purchasing/vendors");
+  revalidatePath("/approvals");
+  return { success: `${vendor.vendor_no} sent for approval.` };
 }
 
 // ---------------------------------------------------------------------------
@@ -144,11 +315,26 @@ export async function createPurchaseRequest(
 
   const supabase = await createClient();
 
+  const jobId = String(formData.get("job_id") ?? "") || null;
+  let locationId = String(formData.get("location_id") ?? "") || null;
+
+  // A request raised against a job is for wherever that job is, so the
+  // property does not have to be picked a second time.
+  if (jobId && !locationId) {
+    const { data: job } = await supabase
+      .from("maintenance_jobs")
+      .select("location_id")
+      .eq("id", jobId)
+      .maybeSingle();
+    locationId = job?.location_id ?? null;
+  }
+
   const { data: request, error } = await supabase
     .from("purchase_requests")
     .insert({
       company_id: companyId,
-      job_id: String(formData.get("job_id") ?? "") || null,
+      job_id: jobId,
+      location_id: locationId,
       needed_by: String(formData.get("needed_by") ?? "") || null,
       justification: String(formData.get("justification") ?? "").trim() || null,
       requested_by: userId,
@@ -244,11 +430,14 @@ export async function createPurchaseOrder(
 
   const supabase = await createClient();
 
+  // The property follows the request unless this order is raised standalone.
+  let locationId = String(formData.get("location_id") ?? "") || null;
+
   // Only an approved request may become an order (spec 10).
   if (requestId) {
     const { data: request } = await supabase
       .from("purchase_requests")
-      .select("status, request_no")
+      .select("status, request_no, location_id")
       .eq("id", requestId)
       .single();
     if (!request) return { error: "Purchase request not found." };
@@ -257,6 +446,7 @@ export async function createPurchaseOrder(
         error: `${request.request_no} is ${request.status} — it must be approved before ordering.`,
       };
     }
+    locationId = request.location_id;
   }
 
   const lines = readLines(formData);
@@ -268,6 +458,7 @@ export async function createPurchaseOrder(
       company_id: companyId,
       vendor_id: vendorId,
       request_id: requestId || null,
+      location_id: locationId,
       expected_date: String(formData.get("expected_date") ?? "") || null,
       notes: String(formData.get("notes") ?? "").trim() || null,
     })

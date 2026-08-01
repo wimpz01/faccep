@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
+import { OccupancyDonut } from "@/components/occupancy-donut";
 import { Card, EmptyState, PageHeader, StatTile, formatDateTime } from "@/components/ui";
 import { requireSession } from "@/lib/auth";
 import { derivedRate, reconcile, round3 } from "@/lib/billing";
@@ -188,6 +189,8 @@ export default async function DashboardPage() {
 
   const totalUnits = occupancyRows.reduce((sum, row) => sum + row.total, 0);
   const totalOccupied = occupancyRows.reduce((sum, row) => sum + row.occupied, 0);
+  // Anything neither occupied nor let is vacant space, so the ring adds up.
+  const totalVacant = totalUnits - totalOccupied;
 
   // --- Receivables ---------------------------------------------------------
   const withBalance = (openInvoices ?? [])
@@ -269,14 +272,15 @@ export default async function DashboardPage() {
         </div>
       ) : null}
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-6">
-        {seeOccupancy ? (
-          <StatTile
-            label="Occupancy"
-            value={`${totalUnits ? Math.round((totalOccupied / totalUnits) * 100) : 0}%`}
-            hint={`${totalOccupied} of ${totalUnits} units`}
-          />
-        ) : null}
+      {seeOccupancy ? (
+        <div className="mb-6">
+          <Card title="Occupancy" description="Let against vacant, across every location.">
+            <OccupancyDonut occupied={totalOccupied} vacant={totalVacant} />
+          </Card>
+        </div>
+      ) : null}
+
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 mb-6">
         {seeIncome ? (
           <StatTile
             label="Collected this month"

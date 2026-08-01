@@ -19,6 +19,7 @@ type RequestRow = {
   needed_by: string | null;
   justification: string | null;
   created_at: string;
+  locations: { code: string; name: string } | null;
   purchase_request_lines: {
     description: string;
     quantity: string;
@@ -40,11 +41,16 @@ export default async function PurchaseRequestsPage() {
   const canEdit = can(context.permissions, MODULE.purchasingRequests, "edit");
 
   const supabase = await createClient();
-  const [{ data: requests }, { data: items }, { data: expenseAccounts }] = await Promise.all([
+  const [
+    { data: requests },
+    { data: items },
+    { data: expenseAccounts },
+    { data: locations },
+  ] = await Promise.all([
     supabase
       .from("purchase_requests")
       .select(
-        "id, request_no, status, needed_by, justification, created_at, purchase_request_lines(description, quantity, estimated_price)",
+        "id, request_no, status, needed_by, justification, created_at, locations(code, name), purchase_request_lines(description, quantity, estimated_price)",
       )
       .eq("company_id", companyId)
       .order("created_at", { ascending: false })
@@ -62,6 +68,12 @@ export default async function PurchaseRequestsPage() {
       .select("id, code, name")
       .eq("company_id", companyId)
       .eq("account_type", "expense")
+      .eq("is_active", true)
+      .order("code"),
+    supabase
+      .from("locations")
+      .select("id, code, name")
+      .eq("company_id", companyId)
       .eq("is_active", true)
       .order("code"),
   ]);
@@ -121,6 +133,7 @@ export default async function PurchaseRequestsPage() {
               action={createPurchaseRequest}
               items={items ?? []}
               expenseAccounts={expenseAccounts ?? []}
+              locations={locations ?? []}
             />
           </Card>
         </div>
@@ -134,6 +147,7 @@ export default async function PurchaseRequestsPage() {
                 <tr>
                   <th>Request</th>
                   <th>Lines</th>
+                  <th>Property</th>
                   <th>Needed by</th>
                   <th className="text-right">Estimate</th>
                   <th>Status</th>
@@ -161,6 +175,16 @@ export default async function PurchaseRequestsPage() {
                         {(request.purchase_request_lines ?? [])
                           .map((line) => `${Number(line.quantity)}× ${line.description}`)
                           .join(", ") || "—"}
+                      </td>
+                      <td className="text-xs">
+                        {request.locations ? (
+                          <>
+                            <span className="badge">{request.locations.code}</span>
+                            <p className="muted mt-0.5">{request.locations.name}</p>
+                          </>
+                        ) : (
+                          <span className="muted">Company-wide</span>
+                        )}
                       </td>
                       <td className="text-xs">{formatDate(request.needed_by)}</td>
                       <td className="text-right tabular-nums">{money(estimate)}</td>

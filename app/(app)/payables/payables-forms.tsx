@@ -7,9 +7,16 @@ import { FormError } from "@/components/ui";
 import { round2 } from "@/lib/billing";
 import { formatDate, money } from "@/lib/format";
 
+import { withholdingRate } from "@/app/(app)/purchasing/constants";
+
 import type { ActionState } from "./actions";
 
-export type VendorOption = { id: string; name: string };
+export type VendorOption = {
+  id: string;
+  name: string;
+  is_vatable?: boolean;
+  withholding?: string;
+};
 export type OpenBill = {
   id: string;
   invoice_no: string;
@@ -43,19 +50,42 @@ function Result({ state }: { state: ActionState }) {
 
 export type ExpenseAccountOption = { id: string; code: string; name: string };
 
+export type LocationOption = { id: string; code: string; name: string };
+
 export function SupplierInvoiceForm({
   action,
   vendors,
   expenseAccounts,
+  locations,
 }: {
   action: (state: ActionState, formData: FormData) => Promise<ActionState>;
   vendors: VendorOption[];
   expenseAccounts: ExpenseAccountOption[];
+  locations: LocationOption[];
 }) {
   const [state, formAction] = useActionState<ActionState, FormData>(action, {});
+  const [vendorId, setVendorId] = useState("");
   const [amount, setAmount] = useState("");
   const [vat, setVat] = useState("");
   const [withholding, setWithholding] = useState("");
+
+  const vendor = vendors.find((row) => row.id === vendorId);
+  const rate = vendor?.is_vatable ? withholdingRate(vendor.withholding ?? "none") : 0;
+
+  /**
+   * What the supplier's tax setting says to withhold. Offered rather than
+   * imposed -- a particular purchase can be exempt, so the field stays editable.
+   */
+  function suggestWithholding(nextVendorId: string, nextAmount: string) {
+    const picked = vendors.find((row) => row.id === nextVendorId);
+    const pickedRate = picked?.is_vatable
+      ? withholdingRate(picked.withholding ?? "none")
+      : 0;
+    if (pickedRate === 0) return "";
+    const base = Number(nextAmount) || 0;
+    if (base <= 0) return "";
+    return round2((base * pickedRate) / 100).toFixed(2);
+  }
 
   const total = round2(
     (Number(amount) || 0) + (Number(vat) || 0) - (Number(withholding) || 0),
@@ -67,7 +97,18 @@ export function SupplierInvoiceForm({
         <label className="label" htmlFor="si-vendor">
           Supplier *
         </label>
-        <select id="si-vendor" name="vendor_id" className="select" required defaultValue="">
+        <select
+          id="si-vendor"
+          name="vendor_id"
+          className="select"
+          required
+          value={vendorId}
+          onChange={(event) => {
+            const next = event.currentTarget.value;
+            setVendorId(next);
+            setWithholding(suggestWithholding(next, amount));
+          }}
+        >
           <option value="">Choose…</option>
           {vendors.map((vendor) => (
             <option key={vendor.id} value={vendor.id}>
@@ -75,6 +116,25 @@ export function SupplierInvoiceForm({
             </option>
           ))}
         </select>
+      </div>
+      <div>
+        <label className="label" htmlFor="si-location">
+          For which property
+        </label>
+        <select
+          id="si-location"
+          name="location_id"
+          className="select"
+          defaultValue=""
+        >
+          <option value="">Company-wide</option>
+          {locations.map((location) => (
+            <option key={location.id} value={location.id}>
+              {location.code} — {location.name}
+            </option>
+          ))}
+        </select>
+        <p className="text-xs muted mt-1">What the spend is charged against.</p>
       </div>
       <div>
         <label className="label" htmlFor="si-no">
@@ -125,7 +185,11 @@ export function SupplierInvoiceForm({
           className="input"
           required
           value={amount}
-          onChange={(event) => setAmount(event.currentTarget.value)}
+          onChange={(event) => {
+            const next = event.currentTarget.value;
+            setAmount(next);
+            setWithholding(suggestWithholding(vendorId, next));
+          }}
         />
       </div>
       <div>
@@ -157,7 +221,13 @@ export function SupplierInvoiceForm({
           value={withholding}
           onChange={(event) => setWithholding(event.currentTarget.value)}
         />
-        <p className="text-xs muted mt-1">Feeds BIR 2307.</p>
+        <p className="text-xs muted mt-1">
+          {rate > 0
+            ? `${rate}% of the amount, from the supplier's setting. Feeds BIR 2307.`
+            : vendor && !vendor.is_vatable
+              ? "Supplier is not VAT-registered."
+              : "Feeds BIR 2307."}
+        </p>
       </div>
       <div>
         <p className="label">Payable to supplier</p>

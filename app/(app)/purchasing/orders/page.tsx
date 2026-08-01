@@ -44,6 +44,7 @@ export default async function PurchaseOrdersPage() {
     { data: items },
     { data: approved },
     { data: expenseAccounts },
+    { data: locations },
   ] = await Promise.all([
       supabase
         .from("purchase_orders")
@@ -58,7 +59,7 @@ export default async function PurchaseOrdersPage() {
         .from("vendors")
         .select("id, name")
         .eq("company_id", companyId)
-        .eq("is_active", true)
+        .eq("status", "approved")
         .order("name"),
       supabase
         .from("inventory_items")
@@ -68,10 +69,17 @@ export default async function PurchaseOrdersPage() {
         .order("name"),
       supabase
         .from("purchase_requests")
-        .select("id, request_no")
+        .select("id, request_no, locations(code, name)")
         .eq("company_id", companyId)
         .eq("status", "approved")
-        .order("request_no"),
+        .order("request_no")
+        .returns<
+          {
+            id: string;
+            request_no: string;
+            locations: { code: string; name: string } | null;
+          }[]
+        >(),
       // Services and utilities are charged to one of these, not to Inventory.
       supabase
         .from("chart_of_accounts")
@@ -80,7 +88,21 @@ export default async function PurchaseOrdersPage() {
         .eq("account_type", "expense")
         .eq("is_active", true)
         .order("code"),
+      supabase
+        .from("locations")
+        .select("id, code, name")
+        .eq("company_id", companyId)
+        .eq("is_active", true)
+        .order("code"),
     ]);
+
+  const approvedRequests = (approved ?? []).map((request) => ({
+    id: request.id,
+    request_no: request.request_no,
+    locationLabel: request.locations
+      ? `${request.locations.code} — ${request.locations.name}`
+      : "Company-wide",
+  }));
 
   const rows = orders ?? [];
   const outstanding = rows.filter((row) =>
@@ -130,7 +152,8 @@ export default async function PurchaseOrdersPage() {
               vendors={vendors ?? []}
               items={items ?? []}
               expenseAccounts={expenseAccounts ?? []}
-              approvedRequests={approved ?? []}
+              approvedRequests={approvedRequests}
+              locations={locations ?? []}
             />
           </Card>
         </div>

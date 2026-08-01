@@ -28,6 +28,7 @@ type OrderDetail = {
   notes: string | null;
   vendors: { name: string; payment_terms: string | null } | null;
   purchase_requests: { request_no: string } | null;
+  locations: { code: string; name: string } | null;
   purchase_order_lines: {
     id: string;
     description: string;
@@ -60,7 +61,7 @@ export default async function PurchaseOrderDetailPage({
   const { data: order } = await supabase
     .from("purchase_orders")
     .select(
-      `*, vendors(name, payment_terms), purchase_requests(request_no),
+      `*, vendors(name, payment_terms), purchase_requests(request_no), locations(code, name),
        purchase_order_lines(id, description, quantity, unit_price, amount, quantity_received),
        goods_receipts(id, receipt_no, received_date, notes)`,
     )
@@ -107,7 +108,13 @@ export default async function PurchaseOrderDetailPage({
     <>
       <PageHeader
         title={order.po_no}
-        description={`${order.vendors?.name ?? "Supplier"} · ordered ${formatDate(order.order_date)}`}
+        description={`${order.vendors?.name ?? "Supplier"} · ordered ${formatDate(
+          order.order_date,
+        )} · ${
+          order.locations
+            ? `${order.locations.code} — ${order.locations.name}`
+            : "Company-wide"
+        }`}
         action={
           <Link href="/purchasing/orders" className="btn btn-secondary btn-sm">
             Back
