@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useActionState, useState } from "react";
 import { useFormStatus } from "react-dom";
 
@@ -15,9 +16,26 @@ export type RequestOption = {
   id: string;
   request_no: string;
   locationLabel: string;
+  /** What was approved, so the order does not have to be keyed in again. */
+  lines: {
+    itemId: string;
+    description: string;
+    quantity: string;
+    price: string;
+  }[];
 };
 export type LocationOption = { id: string; code: string; name: string };
 export type ExpenseAccountOption = { id: string; code: string; name: string };
+
+/** Sized to sit in a card header alongside the title. */
+function SubmitSmall({ label }: { label: string }) {
+  const { pending } = useFormStatus();
+  return (
+    <button type="submit" className="btn btn-primary btn-sm" disabled={pending}>
+      {pending ? "Working…" : label}
+    </button>
+  );
+}
 
 function Submit({ label }: { label: string }) {
   const { pending } = useFormStatus();
@@ -263,6 +281,7 @@ function LineEditor({
                 </th>
               )}
               <th className="text-right">Amount</th>
+              <th style={{ width: "3rem" }} />
             </tr>
           </thead>
           <tbody>
@@ -360,6 +379,23 @@ function LineEditor({
                     (Number(line.quantity) || 0) * (Number(line.price) || 0),
                   )}
                 </td>
+                <td className="text-right">
+                  {/* The last line stays: a document with no lines is not a
+                      document, and "Add line" would be the only way back. */}
+                  {lines.length > 1 ? (
+                    <button
+                      type="button"
+                      className="btn btn-danger btn-sm"
+                      aria-label={`Remove line ${index + 1}`}
+                      title="Remove this line"
+                      onClick={() =>
+                        setLines(lines.filter((_, i) => i !== index))
+                      }
+                    >
+                      ×
+                    </button>
+                  ) : null}
+                </td>
               </tr>
             ))}
             <tr>
@@ -367,6 +403,7 @@ function LineEditor({
                 Estimated total
               </td>
               <td className="text-right tabular-nums font-semibold">{money(total)}</td>
+              <td />
             </tr>
           </tbody>
         </table>
@@ -491,8 +528,28 @@ export function PurchaseOrderForm({
 
   const fromRequest = approvedRequests.find((row) => row.id === requestId);
 
+  // The card is rendered here rather than around this form, so the buttons in
+  // its header are inside the form and can submit it.
   return (
-    <form action={formAction} className="flex flex-col gap-4">
+    <form action={formAction}>
+      <section className="card">
+        <div className="card-header">
+          <div>
+            <h2 className="font-semibold text-sm">Create an order</h2>
+            <p className="text-xs muted mt-0.5">
+              An order raised against a request is refused unless that request
+              is approved.
+            </p>
+          </div>
+          <div className="flex gap-2 flex-wrap">
+            <Link href="/purchasing/orders" className="btn btn-secondary btn-sm">
+              Cancel
+            </Link>
+            <SubmitSmall label="Create order" />
+          </div>
+        </div>
+
+        <div className="card-body flex flex-col gap-4">
       <div className="grid gap-4 sm:grid-cols-3">
         <div>
           <label className="label" htmlFor="po-vendor">
@@ -516,7 +573,24 @@ export function PurchaseOrderForm({
             name="request_id"
             className="select"
             value={requestId}
-            onChange={(event) => setRequestId(event.currentTarget.value)}
+            onChange={(event) => {
+              const next = event.currentTarget.value;
+              setRequestId(next);
+              // The approved request is what the order is for, so its lines
+              // become the order's. Clearing it starts from blank again.
+              const picked = approvedRequests.find((row) => row.id === next);
+              setLines(
+                picked && picked.lines.length > 0
+                  ? picked.lines.map((line) => ({
+                      ...EMPTY_LINE,
+                      itemId: line.itemId,
+                      description: line.description,
+                      quantity: line.quantity,
+                      price: line.price,
+                    }))
+                  : [{ ...EMPTY_LINE }, { ...EMPTY_LINE }],
+              );
+            }}
           >
             <option value="">None — direct order</option>
             {approvedRequests.map((request) => (
@@ -581,10 +655,9 @@ export function PurchaseOrderForm({
         <input id="po-notes" name="notes" className="input" />
       </div>
 
-      <div className="flex items-center gap-3 flex-wrap">
-        <Submit label="Create order" />
-        <Result state={state} />
-      </div>
+          <Result state={state} />
+        </div>
+      </section>
     </form>
   );
 }
@@ -673,5 +746,97 @@ export function ReceiveForm({
         <Result state={state} />
       </div>
     </form>
+  );
+}
+
+/**
+ * Ends a purchase order. A reason is required because a cancelled order stays
+ * on file — the record has to say why nothing was bought on it.
+ */
+export function CancelOrderForm({
+  action,
+  poId,
+}: {
+  action: (state: ActionState, formData: FormData) => Promise<ActionState>;
+  poId: string;
+}) {
+  const [state, formAction] = useActionState<ActionState, FormData>(action, {});
+  const [open, setOpen] = useState(false);
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        className="btn btn-danger"
+        onClick={() => setOpen(true)}
+      >
+        Cancel order
+      </button>
+    );
+  }
+
+  return (
+    <form action={formAction} className="grid gap-3">
+      <input type="hidden" name="id" value={poId} />
+      <div>
+        <label className="label" htmlFor="po-cancel-reason">
+          Why is it being cancelled? *
+        </label>
+        <input
+          id="po-cancel-reason"
+          name="reason"
+          className="input"
+          required
+          placeholder="Supplier cannot deliver; ordering elsewhere"
+        />
+      </div>
+      <div className="flex items-center gap-3 flex-wrap">
+        <CancelSubmit />
+        <button
+          type="button"
+          className="btn btn-secondary"
+          onClick={() => setOpen(false)}
+        >
+          Keep the order
+        </button>
+        <Result state={state} />
+      </div>
+    </form>
+  );
+}
+
+function CancelSubmit() {
+  const { pending } = useFormStatus();
+  return (
+    <button type="submit" className="btn btn-danger" disabled={pending}>
+      {pending ? "Cancelling…" : "Cancel this order"}
+    </button>
+  );
+}
+
+/** Takes back an issue so the order becomes a draft again. */
+export function UnissueOrderForm({
+  action,
+  poId,
+}: {
+  action: (state: ActionState, formData: FormData) => Promise<ActionState>;
+  poId: string;
+}) {
+  const [state, formAction] = useActionState<ActionState, FormData>(action, {});
+  return (
+    <form action={formAction} className="flex items-center gap-3 flex-wrap">
+      <input type="hidden" name="id" value={poId} />
+      <UnissueSubmit />
+      <Result state={state} />
+    </form>
+  );
+}
+
+function UnissueSubmit() {
+  const { pending } = useFormStatus();
+  return (
+    <button type="submit" className="btn btn-secondary" disabled={pending}>
+      {pending ? "Taking back…" : "Take back the issue"}
+    </button>
   );
 }

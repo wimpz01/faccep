@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 
-import { Card, EmptyState, PageHeader, StatTile } from "@/components/ui";
+import { Card, EmptyState, FilterNote, PageHeader, StatTile } from "@/components/ui";
 import { requirePermission } from "@/lib/auth";
 import { formatDate, money } from "@/lib/format";
 import { MODULE, can } from "@/lib/permissions";
@@ -26,7 +26,12 @@ type InquiryRow = {
   units: { code: string } | null;
 };
 
-export default async function InquiriesPage() {
+export default async function InquiriesPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ view?: string }>;
+}) {
+  const { view } = await searchParams;
   const context = await requirePermission(MODULE.crmInquiries, "view");
   const companyId = context.activeCompany!.companyId;
   const canEdit = can(context.permissions, MODULE.crmInquiries, "edit");
@@ -66,6 +71,25 @@ export default async function InquiriesPage() {
   const dueFollowUps = openRows.filter(
     (row) => row.follow_up_on && row.follow_up_on <= today,
   );
+  const won = rows.filter((row) => row.status === "won");
+
+  // Clicking a figure narrows the list below it to exactly what it counted.
+  const shown =
+    view === "open"
+      ? openRows
+      : view === "followup"
+        ? dueFollowUps
+        : view === "won"
+          ? won
+          : rows;
+  const filterLabel =
+    view === "open"
+      ? "inquiries still in play"
+      : view === "followup"
+        ? "inquiries due a follow-up"
+        : view === "won"
+          ? "inquiries converted to tenants"
+          : null;
 
   return (
     <>
@@ -80,16 +104,23 @@ export default async function InquiriesPage() {
       />
 
       <div className="grid gap-4 sm:grid-cols-4 mb-6">
-        <StatTile label="Open" value={openRows.length} hint="Still in play" />
+        <StatTile
+          label="Open"
+          value={openRows.length}
+          hint="Still in play"
+          href="/crm/inquiries?view=open"
+        />
         <StatTile
           label="Follow-ups due"
           value={dueFollowUps.length}
           hint="Today or overdue"
+          href="/crm/inquiries?view=followup"
         />
         <StatTile
           label="Won"
-          value={rows.filter((row) => row.status === "won").length}
+          value={won.length}
           hint="Converted to tenants"
+          href="/crm/inquiries?view=won"
         />
         <StatTile label="Vacant units" value={unitOptions.length} hint="To offer" />
       </div>
@@ -105,8 +136,16 @@ export default async function InquiriesPage() {
         </div>
       ) : null}
 
+      {filterLabel ? (
+        <FilterNote
+          label={filterLabel}
+          count={shown.length}
+          clearHref="/crm/inquiries"
+        />
+      ) : null}
+
       <Card title="Inquiries" bodyClassName="">
-        {rows.length > 0 ? (
+        {shown.length > 0 ? (
           <div className="table-scroll">
             <table className="table">
               <thead>
@@ -120,7 +159,7 @@ export default async function InquiriesPage() {
                 </tr>
               </thead>
               <tbody>
-                {rows.map((inquiry) => {
+                {shown.map((inquiry) => {
                   const overdue =
                     inquiry.follow_up_on &&
                     inquiry.follow_up_on <= today &&

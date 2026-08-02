@@ -527,6 +527,123 @@ export async function issuePurchaseOrder(formData: FormData) {
 }
 
 /**
+ * Ends a draft order before it ever goes out.
+ *
+ * Only a draft: an order already issued is taken back first. Refused once
+ * goods have arrived or a bill exists — the database enforces the same rules,
+ * so none of this can be worked around.
+ */
+export async function cancelPurchaseOrder(
+  _prevState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  try {
+    await assertPermission(MODULE.purchasingOrders, "edit");
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+
+  const id = String(formData.get("id") ?? "");
+  const reason = String(formData.get("reason") ?? "").trim();
+  if (!reason) return { error: "Say why the order is being cancelled." };
+
+  const supabase = await createClient();
+  const { data: order } = await supabase
+    .from("purchase_orders")
+    .select("po_no, status, notes")
+    .eq("id", id)
+    .maybeSingle<{ po_no: string; status: string; notes: string | null }>();
+
+  if (!order) return { error: "Purchase order not found." };
+  if (order.status === "cancelled") {
+    return { error: `${order.po_no} is already cancelled.` };
+  }
+  // An order already with the supplier is taken back first, so the withdrawal
+  // and the cancellation are two separate entries in the trail.
+  if (order.status !== "draft") {
+    return {
+      error: `${order.po_no} has been issued. Take back the issue first, then cancel it.`,
+    };
+  }
+
+  const { error } = await supabase
+    .from("purchase_orders")
+    .update({
+      status: "cancelled",
+      notes: [order.notes, `Cancelled: ${reason}`].filter(Boolean).join(" · "),
+    })
+    .eq("id", id);
+  if (error) return { error: error.message };
+
+  await logAudit({
+    action: "update",
+    moduleKey: MODULE.purchasingOrders,
+    entityTable: "purchase_orders",
+    entityId: id,
+    summary: `Cancelled purchase order ${order.po_no}: ${reason}`,
+    before: { status: order.status },
+    after: { status: "cancelled" },
+  });
+
+  revalidatePath(`/purchasing/orders/${id}`);
+  revalidatePath("/purchasing/orders");
+  return { success: `${order.po_no} cancelled. Nothing more can be bought on it.` };
+}
+
+/**
+ * Takes back an issue, returning the order to draft so its lines can be fixed
+ * and it can go out again. Refused once anything has been received.
+ */
+export async function unissuePurchaseOrder(
+  _prevState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  try {
+    await assertPermission(MODULE.purchasingOrders, "approve");
+  } catch {
+    return { error: "Taking back an issue needs Approve on purchase orders." };
+  }
+
+  const id = String(formData.get("id") ?? "");
+  const supabase = await createClient();
+
+  const { data: order } = await supabase
+    .from("purchase_orders")
+    .select("po_no, status")
+    .eq("id", id)
+    .maybeSingle<{ po_no: string; status: string }>();
+
+  if (!order) return { error: "Purchase order not found." };
+  if (order.status !== "issued") {
+    return {
+      error: `${order.po_no} is ${order.status.replace("_", " ")}, so there is no issue to take back.`,
+    };
+  }
+
+  const { error } = await supabase
+    .from("purchase_orders")
+    .update({ status: "draft" })
+    .eq("id", id);
+  if (error) return { error: error.message };
+
+  await logAudit({
+    action: "update",
+    moduleKey: MODULE.purchasingOrders,
+    entityTable: "purchase_orders",
+    entityId: id,
+    summary: `Took back the issue of ${order.po_no}. It is a draft again.`,
+    before: { status: "issued" },
+    after: { status: "draft" },
+  });
+
+  revalidatePath(`/purchasing/orders/${id}`);
+  revalidatePath("/purchasing/orders");
+  return {
+    success: `${order.po_no} is a draft again. Correct it and issue it afresh.`,
+  };
+}
+
+/**
  * Receiving. The trigger rolls each quantity onto the PO line, moves the order
  * status, and pushes stock into inventory for lines tied to an item.
  */

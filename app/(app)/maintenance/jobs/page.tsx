@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 
-import { Card, EmptyState, PageHeader, StatTile } from "@/components/ui";
+import { Card, EmptyState, FilterNote, PageHeader, StatTile } from "@/components/ui";
 import { requirePermission } from "@/lib/auth";
 import { formatDate, money } from "@/lib/format";
 import { MODULE, can } from "@/lib/permissions";
@@ -28,7 +28,12 @@ type JobRow = {
 
 const OPEN_STATUSES = ["reported", "approved", "assigned", "in_progress"];
 
-export default async function JobsPage() {
+export default async function JobsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ view?: string }>;
+}) {
+  const { view } = await searchParams;
   const context = await requirePermission(MODULE.maintenanceRepairs, "view");
   const companyId = context.activeCompany!.companyId;
   const canEdit = can(context.permissions, MODULE.maintenanceRepairs, "edit");
@@ -61,6 +66,25 @@ export default async function JobsPage() {
   const rows = jobs ?? [];
   const open = rows.filter((job) => OPEN_STATUSES.includes(job.status));
   const awaitingInspection = rows.filter((job) => job.status === "completed");
+  const contracted = rows.filter((job) => job.job_kind === "contracted");
+
+  // Clicking a figure narrows the list below it to exactly what it counted.
+  const shown =
+    view === "open"
+      ? open
+      : view === "inspection"
+        ? awaitingInspection
+        : view === "contracted"
+          ? contracted
+          : rows;
+  const filterLabel =
+    view === "open"
+      ? "jobs not yet completed"
+      : view === "inspection"
+        ? "jobs completed but not signed off"
+        : view === "contracted"
+          ? "jobs given to a vendor"
+          : null;
 
   return (
     <>
@@ -75,16 +99,23 @@ export default async function JobsPage() {
       />
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-6">
-        <StatTile label="Open" value={open.length} hint="Not yet completed" />
+        <StatTile
+          label="Open"
+          value={open.length}
+          hint="Not yet completed"
+          href="/maintenance/jobs?view=open"
+        />
         <StatTile
           label="Awaiting inspection"
           value={awaitingInspection.length}
           hint="Completed, not signed off"
+          href="/maintenance/jobs?view=inspection"
         />
         <StatTile
           label="Contracted"
-          value={rows.filter((job) => job.job_kind === "contracted").length}
+          value={contracted.length}
           hint="With a vendor"
+          href="/maintenance/jobs?view=contracted"
         />
         <StatTile
           label="Committed cost"
@@ -117,8 +148,16 @@ export default async function JobsPage() {
         </div>
       ) : null}
 
+      {filterLabel ? (
+        <FilterNote
+          label={filterLabel}
+          count={shown.length}
+          clearHref="/maintenance/jobs"
+        />
+      ) : null}
+
       <Card title="Jobs" bodyClassName="">
-        {rows.length > 0 ? (
+        {shown.length > 0 ? (
           <div className="table-scroll">
             <table className="table">
               <thead>
@@ -132,7 +171,7 @@ export default async function JobsPage() {
                 </tr>
               </thead>
               <tbody>
-                {rows.map((job) => (
+                {shown.map((job) => (
                   <tr key={job.id}>
                     <td>
                       <Link

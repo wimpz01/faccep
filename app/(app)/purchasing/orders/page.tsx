@@ -1,13 +1,14 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 
-import { Card, EmptyState, PageHeader, StatTile } from "@/components/ui";
+import { FilterNote, PageHeader, StatTile } from "@/components/ui";
 import { requirePermission } from "@/lib/auth";
-import { formatDate, money } from "@/lib/format";
+import { money } from "@/lib/format";
 import { MODULE, can } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
 
 import { createPurchaseOrder } from "../actions";
+import { OrderList } from "../order-list";
 import { PurchaseOrderForm } from "../purchasing-forms";
 
 export const metadata: Metadata = { title: "Purchase orders" };
@@ -23,16 +24,12 @@ type OrderRow = {
   purchase_requests: { request_no: string } | null;
 };
 
-const STATUS_BADGE: Record<string, string> = {
-  draft: "badge",
-  issued: "badge badge-brand",
-  partially_received: "badge badge-brand",
-  received: "badge",
-  closed: "badge",
-  cancelled: "badge",
-};
-
-export default async function PurchaseOrdersPage() {
+export default async function PurchaseOrdersPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ view?: string; add?: string }>;
+}) {
+  const { view, add } = await searchParams;
   const context = await requirePermission(MODULE.purchasingOrders, "view");
   const companyId = context.activeCompany!.companyId;
   const canEdit = can(context.permissions, MODULE.purchasingOrders, "edit");
@@ -69,7 +66,9 @@ export default async function PurchaseOrdersPage() {
         .order("name"),
       supabase
         .from("purchase_requests")
-        .select("id, request_no, locations(code, name)")
+        .select(
+          "id, request_no, locations(code, name), purchase_request_lines(item_id, description, quantity, estimated_price)",
+        )
         .eq("company_id", companyId)
         .eq("status", "approved")
         .order("request_no")
@@ -78,6 +77,12 @@ export default async function PurchaseOrdersPage() {
             id: string;
             request_no: string;
             locations: { code: string; name: string } | null;
+            purchase_request_lines: {
+              item_id: string | null;
+              description: string;
+              quantity: string;
+              estimated_price: string;
+            }[];
           }[]
         >(),
       // Services and utilities are charged to one of these, not to Inventory.
@@ -102,12 +107,26 @@ export default async function PurchaseOrdersPage() {
     locationLabel: request.locations
       ? `${request.locations.code} — ${request.locations.name}`
       : "Company-wide",
+    // Carried onto the order so an approved request does not have to be
+    // keyed in a second time.
+    lines: (request.purchase_request_lines ?? []).map((line) => ({
+      itemId: line.item_id ?? "",
+      description: line.description,
+      quantity: String(Number(line.quantity)),
+      price: String(Number(line.estimated_price)),
+    })),
   }));
 
   const rows = orders ?? [];
   const outstanding = rows.filter((row) =>
     ["issued", "partially_received"].includes(row.status),
   );
+
+  // Clicking a figure narrows the list below it to exactly what it counted.
+  const shown = view === "outstanding" ? outstanding : rows;
+  const filterLabel =
+    view === "outstanding" ? "orders still awaiting delivery" : null;
+  const adding = canEdit && add === "1";
 
   return (
     <>
@@ -122,92 +141,82 @@ export default async function PurchaseOrdersPage() {
             <Link href="/purchasing/vendors" className="btn btn-secondary btn-sm">
               Suppliers
             </Link>
+            {canEdit ? (
+              adding ? (
+                <Link
+                  href="/purchasing/orders"
+                  className="btn btn-secondary btn-sm"
+                >
+                  Close
+                </Link>
+              ) : (
+                <Link
+                  href="/purchasing/orders?add=1"
+                  className="btn btn-primary btn-sm"
+                >
+                  + Create order
+                </Link>
+              )
+            ) : null}
           </div>
         }
       />
 
       <div className="grid gap-4 sm:grid-cols-3 mb-6">
-        <StatTile label="Awaiting delivery" value={outstanding.length} hint="Issued or part received" />
+        <StatTile
+          label="Awaiting delivery"
+          value={outstanding.length}
+          hint="Issued or part received"
+          href="/purchasing/orders?view=outstanding"
+        />
         <StatTile
           label="Committed"
           value={money(outstanding.reduce((sum, row) => sum + Number(row.total), 0))}
           hint="Value still on order"
           tone="money"
+          href="/purchasing/orders?view=outstanding"
         />
         <StatTile
           label="Approved requests"
           value={(approved ?? []).length}
           hint="Ready to turn into orders"
+          href="/purchasing/requests?view=approved"
         />
       </div>
 
-      {canEdit ? (
+      {adding ? (
         <div className="mb-6">
-          <Card
-            title="Create an order"
-            description="An order raised against a request is refused unless that request is approved."
-          >
-            <PurchaseOrderForm
-              action={createPurchaseOrder}
-              vendors={vendors ?? []}
-              items={items ?? []}
-              expenseAccounts={expenseAccounts ?? []}
-              approvedRequests={approvedRequests}
-              locations={locations ?? []}
-            />
-          </Card>
+          <PurchaseOrderForm
+            action={createPurchaseOrder}
+            vendors={vendors ?? []}
+            items={items ?? []}
+            expenseAccounts={expenseAccounts ?? []}
+            approvedRequests={approvedRequests}
+            locations={locations ?? []}
+          />
         </div>
       ) : null}
 
-      <Card title="Orders" bodyClassName="">
-        {rows.length > 0 ? (
-          <div className="table-scroll">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Order</th>
-                  <th>Supplier</th>
-                  <th>Ordered</th>
-                  <th>Expected</th>
-                  <th className="text-right">Total</th>
-                  <th>Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((order) => (
-                  <tr key={order.id}>
-                    <td>
-                      <Link
-                        href={`/purchasing/orders/${order.id}`}
-                        className="font-semibold"
-                        style={{ color: "var(--color-brand-600)" }}
-                      >
-                        {order.po_no}
-                      </Link>
-                      {order.purchase_requests?.request_no ? (
-                        <p className="text-xs muted">
-                          from {order.purchase_requests.request_no}
-                        </p>
-                      ) : null}
-                    </td>
-                    <td className="text-sm">{order.vendors?.name ?? "—"}</td>
-                    <td className="text-xs">{formatDate(order.order_date)}</td>
-                    <td className="text-xs">{formatDate(order.expected_date)}</td>
-                    <td className="text-right tabular-nums">{money(order.total)}</td>
-                    <td>
-                      <span className={STATUS_BADGE[order.status] ?? "badge"}>
-                        {order.status.replace("_", " ")}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <EmptyState>No purchase orders yet.</EmptyState>
-        )}
-      </Card>
+      {filterLabel ? (
+        <FilterNote
+          label={filterLabel}
+          count={shown.length}
+          clearHref="/purchasing/orders"
+        />
+      ) : null}
+
+      <OrderList
+        rows={shown.map((order) => ({
+          id: order.id,
+          po_no: order.po_no,
+          fromRequest: order.purchase_requests?.request_no ?? null,
+          vendor: order.vendors?.name ?? "—",
+          order_date: order.order_date,
+          expected_date: order.expected_date,
+          total: Number(order.total),
+          status: order.status,
+        }))}
+      />
     </>
   );
 }

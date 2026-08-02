@@ -1,14 +1,15 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 
-import { Card, EmptyState, PageHeader, StatTile } from "@/components/ui";
+import { Card, FilterNote, PageHeader, StatTile } from "@/components/ui";
 import { requirePermission } from "@/lib/auth";
-import { formatDate, money } from "@/lib/format";
+import { money } from "@/lib/format";
 import { MODULE, can } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
 
 import { createPurchaseRequest, submitPurchaseRequest } from "../actions";
-import { PurchaseRequestForm, SubmitRequestForm } from "../purchasing-forms";
+import { PurchaseRequestForm } from "../purchasing-forms";
+import { RequestList } from "../request-list";
 
 export const metadata: Metadata = { title: "Purchase requests" };
 
@@ -27,15 +28,12 @@ type RequestRow = {
   }[];
 };
 
-const STATUS_BADGE: Record<string, string> = {
-  draft: "badge",
-  pending: "badge badge-brand",
-  approved: "badge",
-  rejected: "badge",
-  ordered: "badge",
-};
-
-export default async function PurchaseRequestsPage() {
+export default async function PurchaseRequestsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ view?: string; add?: string }>;
+}) {
+  const { view, add } = await searchParams;
   const context = await requirePermission(MODULE.purchasingRequests, "view");
   const companyId = context.activeCompany!.companyId;
   const canEdit = can(context.permissions, MODULE.purchasingRequests, "edit");
@@ -82,6 +80,17 @@ export default async function PurchaseRequestsPage() {
   const pending = rows.filter((row) => row.status === "pending");
   const approved = rows.filter((row) => row.status === "approved");
 
+  // Clicking a figure narrows the list below it to exactly what it counted.
+  const shown =
+    view === "pending" ? pending : view === "approved" ? approved : rows;
+  const adding = canEdit && add === "1";
+  const filterLabel =
+    view === "pending"
+      ? "requests awaiting approval"
+      : view === "approved"
+        ? "approved requests, ready to order"
+        : null;
+
   return (
     <>
       <PageHeader
@@ -95,13 +104,40 @@ export default async function PurchaseRequestsPage() {
             <Link href="/purchasing/vendors" className="btn btn-secondary btn-sm">
               Suppliers
             </Link>
+            {canEdit ? (
+              adding ? (
+                <Link
+                  href="/purchasing/requests"
+                  className="btn btn-secondary btn-sm"
+                >
+                  Close
+                </Link>
+              ) : (
+                <Link
+                  href="/purchasing/requests?add=1"
+                  className="btn btn-primary btn-sm"
+                >
+                  + Raise request
+                </Link>
+              )
+            ) : null}
           </div>
         }
       />
 
       <div className="grid gap-4 sm:grid-cols-3 mb-6">
-        <StatTile label="Awaiting approval" value={pending.length} hint="In the queue" />
-        <StatTile label="Approved" value={approved.length} hint="Ready to order" />
+        <StatTile
+          label="Awaiting approval"
+          value={pending.length}
+          hint="In the queue"
+          href="/purchasing/requests?view=pending"
+        />
+        <StatTile
+          label="Approved"
+          value={approved.length}
+          hint="Ready to order"
+          href="/purchasing/requests?view=approved"
+        />
         <StatTile
           label="Estimated value"
           value={money(
@@ -123,7 +159,7 @@ export default async function PurchaseRequestsPage() {
         />
       </div>
 
-      {canEdit ? (
+      {adding ? (
         <div className="mb-6">
           <Card
             title="Raise a request"
@@ -139,80 +175,35 @@ export default async function PurchaseRequestsPage() {
         </div>
       ) : null}
 
-      <Card title="Requests" bodyClassName="">
-        {rows.length > 0 ? (
-          <div className="table-scroll">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Request</th>
-                  <th>Lines</th>
-                  <th>Property</th>
-                  <th>Needed by</th>
-                  <th className="text-right">Estimate</th>
-                  <th>Status</th>
-                  {canEdit ? <th className="text-right">Action</th> : null}
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((request) => {
-                  const estimate = (request.purchase_request_lines ?? []).reduce(
-                    (sum, line) =>
-                      sum + Number(line.quantity) * Number(line.estimated_price),
-                    0,
-                  );
-                  return (
-                    <tr key={request.id}>
-                      <td>
-                        <span className="font-semibold text-sm">
-                          {request.request_no}
-                        </span>
-                        {request.justification ? (
-                          <p className="text-xs muted">{request.justification}</p>
-                        ) : null}
-                      </td>
-                      <td className="text-xs">
-                        {(request.purchase_request_lines ?? [])
-                          .map((line) => `${Number(line.quantity)}× ${line.description}`)
-                          .join(", ") || "—"}
-                      </td>
-                      <td className="text-xs">
-                        {request.locations ? (
-                          <>
-                            <span className="badge">{request.locations.code}</span>
-                            <p className="muted mt-0.5">{request.locations.name}</p>
-                          </>
-                        ) : (
-                          <span className="muted">Company-wide</span>
-                        )}
-                      </td>
-                      <td className="text-xs">{formatDate(request.needed_by)}</td>
-                      <td className="text-right tabular-nums">{money(estimate)}</td>
-                      <td>
-                        <span className={STATUS_BADGE[request.status] ?? "badge"}>
-                          {request.status}
-                        </span>
-                      </td>
-                      {canEdit ? (
-                        <td className="text-right">
-                          {request.status === "draft" ? (
-                            <SubmitRequestForm
-                              action={submitPurchaseRequest}
-                              requestId={request.id}
-                            />
-                          ) : null}
-                        </td>
-                      ) : null}
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <EmptyState>No purchase requests yet.</EmptyState>
-        )}
-      </Card>
+      {filterLabel ? (
+        <FilterNote
+          label={filterLabel}
+          count={shown.length}
+          clearHref="/purchasing/requests"
+        />
+      ) : null}
+
+      <RequestList
+        rows={shown.map((request) => ({
+          id: request.id,
+          request_no: request.request_no,
+          justification: request.justification,
+          lines: (request.purchase_request_lines ?? [])
+            .map((line) => `${Number(line.quantity)}× ${line.description}`)
+            .join(", "),
+          locationCode: request.locations?.code ?? null,
+          locationName: request.locations?.name ?? null,
+          needed_by: request.needed_by,
+          estimate: (request.purchase_request_lines ?? []).reduce(
+            (sum, line) =>
+              sum + Number(line.quantity) * Number(line.estimated_price),
+            0,
+          ),
+          status: request.status,
+        }))}
+        canEdit={canEdit}
+        submitAction={submitPurchaseRequest}
+      />
     </>
   );
 }

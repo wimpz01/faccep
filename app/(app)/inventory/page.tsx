@@ -1,14 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 
-import {
-  Card,
-  EmptyState,
-  PageHeader,
-  StatTile,
-  TabBar,
-  formatDateTime,
-} from "@/components/ui";
+import { Card, EmptyState, FilterNote, PageHeader, StatTile, TabBar, formatDateTime } from "@/components/ui";
 import { requirePermission } from "@/lib/auth";
 import { money } from "@/lib/format";
 import { MODULE, can } from "@/lib/permissions";
@@ -48,9 +41,9 @@ const TAB_CATEGORIES = "categories";
 export default async function InventoryPage({
   searchParams,
 }: {
-  searchParams: Promise<{ tab?: string; add?: string }>;
+  searchParams: Promise<{ tab?: string; add?: string; view?: string }>;
 }) {
-  const { tab, add } = await searchParams;
+  const { tab, add, view } = await searchParams;
   const context = await requirePermission(MODULE.inventoryItems, "view");
   const companyId = context.activeCompany!.companyId;
   const canEditItems = can(context.permissions, MODULE.inventoryItems, "edit");
@@ -105,6 +98,11 @@ export default async function InventoryPage({
       Number(item.reorder_level) > 0 &&
       Number(item.quantity_on_hand) <= Number(item.reorder_level),
   );
+  // Clicking a figure narrows the item list to exactly what it counted.
+  const shown = view === "reorder" ? belowReorder : rows;
+  const filterLabel =
+    view === "reorder" ? "items at or below their reorder level" : null;
+
   const stockValue = rows.reduce(
     (sum, item) => sum + Number(item.quantity_on_hand) * Number(item.unit_cost),
     0,
@@ -136,17 +134,24 @@ export default async function InventoryPage({
       />
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 mb-6">
-        <StatTile label="Items" value={rows.length} hint="Active stock items" />
+        <StatTile
+          label="Items"
+          value={rows.length}
+          hint="Active stock items"
+          href="/inventory?tab=items"
+        />
         <StatTile
           label="Stock value"
           value={money(stockValue)}
           hint="On hand at unit cost"
           tone="money"
+          href="/inventory?tab=items"
         />
         <StatTile
           label="At or below reorder"
           value={belowReorder.length}
           hint="Needs replenishing"
+          href="/inventory?tab=items&view=reorder"
         />
       </div>
 
@@ -190,13 +195,29 @@ export default async function InventoryPage({
         ]}
       />
 
+      {filterLabel && active === TAB_ITEMS ? (
+
+        <FilterNote
+
+          label={filterLabel}
+
+          count={shown.length}
+
+          clearHref={`/inventory?tab=${TAB_ITEMS}`}
+
+        />
+
+      ) : null}
+
+      
+
       {active === TAB_ITEMS ? (
         <Card
           title="Item list"
           description="Everything on file. Open an item to see what it cost, who supplied it and where it went."
           bodyClassName=""
         >
-          {rows.length > 0 ? (
+          {shown.length > 0 ? (
             <div className="table-scroll">
               <table className="table">
                 <thead>
@@ -210,7 +231,7 @@ export default async function InventoryPage({
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map((item) => {
+                  {shown.map((item) => {
                     const low =
                       Number(item.reorder_level) > 0 &&
                       Number(item.quantity_on_hand) <= Number(item.reorder_level);

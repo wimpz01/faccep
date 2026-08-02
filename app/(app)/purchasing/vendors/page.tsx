@@ -1,15 +1,15 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 
-import { Card, EmptyState, PageHeader } from "@/components/ui";
+import { Card, PageHeader } from "@/components/ui";
 import { requirePermission } from "@/lib/auth";
-import { money } from "@/lib/format";
 import { MODULE, can } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
 
 import { createVendor, resendVendorApproval } from "../actions";
 import { withholdingLabel } from "../constants";
-import { ResendApprovalForm, VendorForm } from "../purchasing-forms";
+import { VendorForm } from "../purchasing-forms";
+import { VendorList } from "../vendor-list";
 
 export const metadata: Metadata = { title: "Suppliers" };
 
@@ -28,7 +28,12 @@ type VendorRow = {
   payment_terms: { name: string; days: number } | null;
 };
 
-export default async function VendorsPage() {
+export default async function VendorsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ add?: string }>;
+}) {
+  const { add } = await searchParams;
   const context = await requirePermission(MODULE.purchasingVendors, "view");
   const companyId = context.activeCompany!.companyId;
   const canEdit = can(context.permissions, MODULE.purchasingVendors, "edit");
@@ -89,6 +94,7 @@ export default async function VendorsPage() {
   }
 
   const pending = (vendors ?? []).filter((row) => row.status === "pending");
+  const adding = canEdit && add === "1";
 
   return (
     <>
@@ -96,13 +102,32 @@ export default async function VendorsPage() {
         title="Suppliers"
         description="Who you buy from, their TIN for withholding tax, and their payment terms."
         action={
-          <Link href="/purchasing/terms" className="btn btn-secondary btn-sm">
-            Payment terms
-          </Link>
+          <div className="flex gap-2 flex-wrap">
+            <Link href="/purchasing/terms" className="btn btn-secondary btn-sm">
+              Payment terms
+            </Link>
+            {canEdit ? (
+              adding ? (
+                <Link
+                  href="/purchasing/vendors"
+                  className="btn btn-secondary btn-sm"
+                >
+                  Close
+                </Link>
+              ) : (
+                <Link
+                  href="/purchasing/vendors?add=1"
+                  className="btn btn-primary btn-sm"
+                >
+                  + New supplier
+                </Link>
+              )
+            ) : null}
+          </div>
         }
       />
 
-      {canEdit ? (
+      {adding ? (
         <div className="mb-6">
           <Card title="Add a supplier">
             <VendorForm action={createVendor} terms={terms ?? []} />
@@ -110,132 +135,27 @@ export default async function VendorsPage() {
         </div>
       ) : null}
 
-      <Card
-        title="Suppliers"
-        description={
-          pending.length > 0
-            ? `${pending.length} awaiting approval — they cannot be ordered from or billed until signed off.`
-            : "A code is issued on save. A new supplier is unusable until somebody with Approve signs them off."
-        }
-        bodyClassName=""
-      >
-        {vendors && vendors.length > 0 ? (
-          <div className="table-scroll">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Code</th>
-                  <th>Supplier</th>
-                  <th>TIN</th>
-                  <th>Contact</th>
-                  <th>Terms</th>
-                  <th>Tax</th>
-                  <th>Status</th>
-                  {canEdit ? <th className="text-right">Move to</th> : null}
-                </tr>
-              </thead>
-              <tbody>
-                {vendors.map((vendor) => (
-                  <tr key={vendor.id}>
-                    <td>
-                      <span className="font-semibold text-sm tabular-nums">
-                        {vendor.vendor_no}
-                      </span>
-                    </td>
-                    <td>
-                      <span className="font-medium text-sm">{vendor.name}</span>
-                      {vendor.address ? (
-                        <p className="text-xs muted">{vendor.address}</p>
-                      ) : null}
-                    </td>
-                    <td className="text-xs">{vendor.tin ?? "—"}</td>
-                    <td className="text-xs">
-                      {vendor.contact_person ?? "—"}
-                      {vendor.contact_number ? (
-                        <p className="muted">{vendor.contact_number}</p>
-                      ) : null}
-                    </td>
-                    <td className="text-xs">
-                      {vendor.payment_terms ? (
-                        <>
-                          {vendor.payment_terms.name}
-                          <p className="muted">
-                            {vendor.payment_terms.days === 0
-                              ? "on delivery"
-                              : `${vendor.payment_terms.days} days`}
-                          </p>
-                        </>
-                      ) : (
-                        "—"
-                      )}
-                    </td>
-                    <td className="text-xs">
-                      {vendor.is_vatable ? (
-                        <>
-                          <span className="badge">VAT</span>
-                          <p className="muted mt-0.5">
-                            {withholdingLabel(vendor.withholding)}
-                          </p>
-                        </>
-                      ) : (
-                        <span className="muted">non-VAT</span>
-                      )}
-                    </td>
-                    <td>
-                      <span
-                        className={
-                          vendor.status === "approved"
-                            ? "badge badge-brand"
-                            : "badge"
-                        }
-                        style={
-                          vendor.status === "rejected"
-                            ? { color: "var(--danger)" }
-                            : undefined
-                        }
-                      >
-                        {vendor.status === "pending"
-                          ? "awaiting approval"
-                          : vendor.status}
-                      </span>
-                      {owing.has(vendor.id) ? (
-                        <p className="text-xs muted mt-0.5">
-                          owed {money(owing.get(vendor.id) ?? 0)}
-                        </p>
-                      ) : null}
-                    </td>
-                    {canEdit ? (
-                      <td className="text-right text-xs muted">
-                        {vendor.status === "pending" ? (
-                          queued.has(vendor.id) ? (
-                            <Link
-                              href="/approvals"
-                              style={{ color: "var(--color-brand-600)" }}
-                            >
-                              In the approvals queue
-                            </Link>
-                          ) : (
-                            <ResendApprovalForm
-                              action={resendVendorApproval}
-                              vendorId={vendor.id}
-                            />
-                          )
-                        ) : vendor.status === "rejected" ? (
-                          "Declined — kept for the record"
-                        ) : (
-                          "—"
-                        )}
-                      </td>
-                    ) : null}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <EmptyState>No suppliers recorded yet.</EmptyState>
-        )}
-      </Card>
+      <VendorList
+        rows={(vendors ?? []).map((vendor) => ({
+          id: vendor.id,
+          vendor_no: vendor.vendor_no,
+          name: vendor.name,
+          address: vendor.address,
+          tin: vendor.tin,
+          contact_person: vendor.contact_person,
+          contact_number: vendor.contact_number,
+          termsName: vendor.payment_terms?.name ?? null,
+          termsDays: vendor.payment_terms?.days ?? null,
+          is_vatable: vendor.is_vatable,
+          withholdingLabel: withholdingLabel(vendor.withholding),
+          status: vendor.status,
+          owed: owing.get(vendor.id) ?? 0,
+          queued: queued.has(vendor.id),
+        }))}
+        canEdit={canEdit}
+        pendingCount={pending.length}
+        resendAction={resendVendorApproval}
+      />
     </>
   );
 }

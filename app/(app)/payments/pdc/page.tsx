@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 
-import { Card, EmptyState, PageHeader, StatTile } from "@/components/ui";
+import { Card, EmptyState, FilterNote, PageHeader, StatTile } from "@/components/ui";
 import { requirePermission } from "@/lib/auth";
 import { formatDate, money } from "@/lib/format";
 import { MODULE, can } from "@/lib/permissions";
@@ -61,7 +61,12 @@ function mayRequestCancel(status: string) {
   return status === "pending" || status === "matured";
 }
 
-export default async function PdcPage() {
+export default async function PdcPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ view?: string }>;
+}) {
+  const { view } = await searchParams;
   const context = await requirePermission(MODULE.paymentsPdc, "view");
   const companyId = context.activeCompany!.companyId;
   const canEdit = can(context.permissions, MODULE.paymentsPdc, "edit");
@@ -105,6 +110,29 @@ export default async function PdcPage() {
   );
   // A cheque dated today can be banked today, so maturity is inclusive.
   const readyToDeposit = onHand.filter((row) => row.maturity_date <= today);
+  const bounced = rows.filter((row) => row.status === "bounced");
+
+  // Clicking a figure narrows the register to exactly what it counted.
+  const shown =
+    view === "onhand"
+      ? onHand
+      : view === "maturing"
+        ? maturingSoon
+        : view === "due"
+          ? readyToDeposit
+          : view === "bounced"
+            ? bounced
+            : rows;
+  const filterLabel =
+    view === "onhand"
+      ? "cheques on hand"
+      : view === "maturing"
+        ? "cheques maturing within 30 days"
+        : view === "due"
+          ? "cheques past maturity, not yet deposited"
+          : view === "bounced"
+            ? "bounced cheques"
+            : null;
   const readyValue = readyToDeposit.reduce(
     (sum, row) => sum + Number(row.amount),
     0,
@@ -190,21 +218,25 @@ export default async function PdcPage() {
           value={money(onHand.reduce((sum, row) => sum + Number(row.amount), 0))}
           hint={`${onHand.length} cheque(s)`}
           tone="money"
+          href="/payments/pdc?view=onhand"
         />
         <StatTile
           label="Maturing in 30 days"
           value={maturingSoon.length}
           hint="Prepare a deposit slip"
+          href="/payments/pdc?view=maturing"
         />
         <StatTile
           label="Past maturity"
           value={readyToDeposit.length}
           hint="Not yet deposited"
+          href="/payments/pdc?view=due"
         />
         <StatTile
           label="Bounced"
-          value={rows.filter((row) => row.status === "bounced").length}
+          value={bounced.length}
           hint="Needs follow-up"
+          href="/payments/pdc?view=bounced"
         />
       </div>
 
@@ -216,8 +248,16 @@ export default async function PdcPage() {
         </div>
       ) : null}
 
+      {filterLabel ? (
+        <FilterNote
+          label={filterLabel}
+          count={shown.length}
+          clearHref="/payments/pdc"
+        />
+      ) : null}
+
       <Card title="Cheque register" bodyClassName="">
-        {rows.length > 0 ? (
+        {shown.length > 0 ? (
           <div className="table-scroll">
             <table className="table">
               <thead>
@@ -231,7 +271,7 @@ export default async function PdcPage() {
                 </tr>
               </thead>
               <tbody>
-                {rows.map((cheque) => {
+                {shown.map((cheque) => {
                   const hasMatured = cheque.maturity_date <= today;
                   const isDue =
                     (cheque.status === "pending" || cheque.status === "matured") &&

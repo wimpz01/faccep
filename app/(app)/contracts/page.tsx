@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 
-import { Card, EmptyState, PageHeader, StatTile } from "@/components/ui";
+import { Card, EmptyState, FilterNote, PageHeader, StatTile } from "@/components/ui";
 import { requirePermission } from "@/lib/auth";
 import { formatDate, money, monthsUntil } from "@/lib/format";
 import { MODULE, can } from "@/lib/permissions";
@@ -23,7 +23,12 @@ type ContractRow = {
   contract_units: { units: { code: string } | null }[];
 };
 
-export default async function ContractsPage() {
+export default async function ContractsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ view?: string }>;
+}) {
+  const { view } = await searchParams;
   const context = await requirePermission(MODULE.contracts, "view");
   const companyId = context.activeCompany!.companyId;
   const canEdit = can(context.permissions, MODULE.contracts, "edit");
@@ -46,6 +51,24 @@ export default async function ContractsPage() {
     const months = monthsUntil(row.end_date);
     return months !== null && months <= 6;
   });
+  // Clicking a figure narrows the list below it to exactly what it counted.
+  const shown =
+    view === "active"
+      ? active
+      : view === "drafts"
+        ? drafts
+        : view === "renewals"
+          ? renewalsDue
+          : rows;
+  const filterLabel =
+    view === "active"
+      ? "contracts currently running"
+      : view === "drafts"
+        ? "contracts not yet activated"
+        : view === "renewals"
+          ? "contracts ending within six months"
+          : null;
+
   const contractedRent = active.reduce(
     (sum, row) => sum + Number(row.monthly_rent),
     0,
@@ -66,23 +89,39 @@ export default async function ContractsPage() {
       />
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-6">
-        <StatTile label="Active" value={active.length} hint="Currently running" />
-        <StatTile label="Drafts" value={drafts.length} hint="Not yet activated" />
+        <StatTile
+          label="Active"
+          value={active.length}
+          hint="Currently running"
+          href="/contracts?view=active"
+        />
+        <StatTile
+          label="Drafts"
+          value={drafts.length}
+          hint="Not yet activated"
+          href="/contracts?view=drafts"
+        />
         <StatTile
           label="Renewals due"
           value={renewalsDue.length}
           hint="Ending within 6 months"
+          href="/contracts?view=renewals"
         />
         <StatTile
           label="Contracted rent"
           value={money(contractedRent)}
           hint="Monthly, active contracts"
+          href="/contracts?view=active"
           tone="money"
         />
       </div>
 
+      {filterLabel ? (
+        <FilterNote label={filterLabel} count={shown.length} clearHref="/contracts" />
+      ) : null}
+
       <Card title="All contracts" bodyClassName="">
-        {rows.length > 0 ? (
+        {shown.length > 0 ? (
           <div className="table-scroll">
             <table className="table">
               <thead>
@@ -97,7 +136,7 @@ export default async function ContractsPage() {
                 </tr>
               </thead>
               <tbody>
-                {rows.map((row) => {
+                {shown.map((row) => {
                   const months = monthsUntil(row.end_date);
                   const endingSoon =
                     row.status === "active" && months !== null && months <= 6;

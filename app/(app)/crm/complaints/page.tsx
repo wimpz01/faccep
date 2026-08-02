@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 
-import { Card, EmptyState, PageHeader, StatTile } from "@/components/ui";
+import { Card, EmptyState, FilterNote, PageHeader, StatTile } from "@/components/ui";
 import { requirePermission } from "@/lib/auth";
 import { formatDate } from "@/lib/format";
 import { MODULE, can } from "@/lib/permissions";
@@ -27,7 +27,12 @@ type ComplaintRow = {
   complaint_updates: { id: string; note: string; created_at: string }[];
 };
 
-export default async function ComplaintsPage() {
+export default async function ComplaintsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ view?: string }>;
+}) {
+  const { view } = await searchParams;
   const context = await requirePermission(MODULE.crmComplaints, "view");
   const companyId = context.activeCompany!.companyId;
   const canEdit = can(context.permissions, MODULE.crmComplaints, "edit");
@@ -76,6 +81,17 @@ export default async function ComplaintsPage() {
   const open = rows.filter(
     (row) => row.status === "open" || row.status === "in_progress",
   );
+  const resolved = rows.filter((row) => row.status === "resolved");
+
+  // Clicking a figure narrows the list below it to exactly what it counted.
+  const shown =
+    view === "open" ? open : view === "resolved" ? resolved : rows;
+  const filterLabel =
+    view === "open"
+      ? "complaints awaiting resolution"
+      : view === "resolved"
+        ? "complaints fixed but not yet closed"
+        : null;
 
   return (
     <>
@@ -90,13 +106,24 @@ export default async function ComplaintsPage() {
       />
 
       <div className="grid gap-4 sm:grid-cols-3 mb-6">
-        <StatTile label="Open" value={open.length} hint="Awaiting resolution" />
+        <StatTile
+          label="Open"
+          value={open.length}
+          hint="Awaiting resolution"
+          href="/crm/complaints?view=open"
+        />
         <StatTile
           label="Resolved"
-          value={rows.filter((row) => row.status === "resolved").length}
+          value={resolved.length}
           hint="Fixed, not yet closed"
+          href="/crm/complaints?view=resolved"
         />
-        <StatTile label="Logged" value={rows.length} hint="All time" />
+        <StatTile
+          label="Logged"
+          value={rows.length}
+          hint="All time"
+          href="/crm/complaints"
+        />
       </div>
 
       {canEdit ? (
@@ -111,10 +138,18 @@ export default async function ComplaintsPage() {
         </div>
       ) : null}
 
+      {filterLabel ? (
+        <FilterNote
+          label={filterLabel}
+          count={shown.length}
+          clearHref="/crm/complaints"
+        />
+      ) : null}
+
       <Card title="Complaints" bodyClassName="">
-        {rows.length > 0 ? (
+        {shown.length > 0 ? (
           <div className="flex flex-col">
-            {rows.map((complaint) => (
+            {shown.map((complaint) => (
               <details
                 key={complaint.id}
                 className="border-b last:border-b-0"

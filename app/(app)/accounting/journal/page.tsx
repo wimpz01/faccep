@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 
-import { Card, EmptyState, PageHeader, StatTile } from "@/components/ui";
+import { Card, EmptyState, FilterNote, PageHeader, StatTile } from "@/components/ui";
 import { requirePermission } from "@/lib/auth";
 import { formatDate, money } from "@/lib/format";
 import { MODULE, can } from "@/lib/permissions";
@@ -23,7 +23,12 @@ type EntryRow = {
   journal_lines: { debit: string; credit: string }[];
 };
 
-export default async function JournalPage() {
+export default async function JournalPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ view?: string }>;
+}) {
+  const { view } = await searchParams;
   const context = await requirePermission(MODULE.accountingJournal, "view");
   const companyId = context.activeCompany!.companyId;
   const canEdit = can(context.permissions, MODULE.accountingJournal, "edit");
@@ -52,6 +57,16 @@ export default async function JournalPage() {
   const drafts = rows.filter((row) => row.status === "draft");
   const posted = rows.filter((row) => row.status === "posted");
 
+  // Clicking a figure narrows the list below it to exactly what it counted.
+  const shown =
+    view === "drafts" ? drafts : view === "posted" ? posted : rows;
+  const filterLabel =
+    view === "drafts"
+      ? "entries not yet in the ledger"
+      : view === "posted"
+        ? "entries posted to the ledger"
+        : null;
+
   return (
     <>
       <PageHeader
@@ -70,8 +85,18 @@ export default async function JournalPage() {
       />
 
       <div className="grid gap-4 sm:grid-cols-3 mb-6">
-        <StatTile label="Drafts" value={drafts.length} hint="Not yet in the ledger" />
-        <StatTile label="Posted" value={posted.length} hint="In the ledger" />
+        <StatTile
+          label="Drafts"
+          value={drafts.length}
+          hint="Not yet in the ledger"
+          href="/accounting/journal?view=drafts"
+        />
+        <StatTile
+          label="Posted"
+          value={posted.length}
+          hint="In the ledger"
+          href="/accounting/journal?view=posted"
+        />
         <StatTile
           label="Posted value"
           value={money(
@@ -118,8 +143,16 @@ export default async function JournalPage() {
         </div>
       ) : null}
 
+      {filterLabel ? (
+        <FilterNote
+          label={filterLabel}
+          count={shown.length}
+          clearHref="/accounting/journal"
+        />
+      ) : null}
+
       <Card title="Entries" bodyClassName="">
-        {rows.length > 0 ? (
+        {shown.length > 0 ? (
           <div className="table-scroll">
             <table className="table">
               <thead>
@@ -132,7 +165,7 @@ export default async function JournalPage() {
                 </tr>
               </thead>
               <tbody>
-                {rows.map((entry) => {
+                {shown.map((entry) => {
                   const amount = (entry.journal_lines ?? []).reduce(
                     (sum, line) => sum + Number(line.debit),
                     0,

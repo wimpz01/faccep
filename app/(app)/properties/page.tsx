@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 
-import { Card, EmptyState, PageHeader, StatTile } from "@/components/ui";
+import { Card, EmptyState, FilterNote, PageHeader, StatTile } from "@/components/ui";
 import { requirePermission } from "@/lib/auth";
 import { money } from "@/lib/format";
 import { MODULE, can } from "@/lib/permissions";
@@ -25,7 +25,12 @@ const TYPE_LABELS = Object.fromEntries(
   PROPERTY_TYPES.map((type) => [type.value, type.label]),
 );
 
-export default async function PropertiesPage() {
+export default async function PropertiesPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ view?: string }>;
+}) {
+  const { view } = await searchParams;
   const context = await requirePermission(MODULE.properties, "view");
   const companyId = context.activeCompany!.companyId;
   const canEditUnits = can(context.permissions, MODULE.units, "edit");
@@ -70,6 +75,20 @@ export default async function PropertiesPage() {
     { units: 0, occupied: 0, vacant: 0, contracted: 0 },
   );
 
+  // Clicking a figure narrows the list to the properties behind it.
+  const shown =
+    view === "vacant"
+      ? rows.filter((row) => row.vacant > 0)
+      : view === "let"
+        ? rows.filter((row) => row.occupied > 0)
+        : rows;
+  const filterLabel =
+    view === "vacant"
+      ? "properties with a unit standing empty"
+      : view === "let"
+        ? "properties with a unit let"
+        : null;
+
   const overallOccupancy =
     totals.units === 0 ? 0 : (totals.occupied / totals.units) * 100;
 
@@ -85,19 +104,39 @@ export default async function PropertiesPage() {
           label="Occupancy"
           value={`${overallOccupancy.toFixed(0)}%`}
           hint={`${totals.occupied} of ${totals.units} units`}
+          href="/properties"
         />
-        <StatTile label="Vacant units" value={totals.vacant} hint="Available to let" />
+        <StatTile
+          label="Vacant units"
+          value={totals.vacant}
+          hint="Available to let"
+          href="/properties?view=vacant"
+        />
         <StatTile
           label="Contracted rent"
           value={money(totals.contracted)}
           hint="Monthly, occupied units"
+          href="/properties?view=let"
           tone="money"
         />
-        <StatTile label="Locations" value={rows.length} hint="In this company" />
+        <StatTile
+          label="Locations"
+          value={rows.length}
+          hint="In this company"
+          href="/properties"
+        />
       </div>
 
+      {filterLabel ? (
+        <FilterNote
+          label={filterLabel}
+          count={shown.length}
+          clearHref="/properties"
+        />
+      ) : null}
+
       <Card title="Locations" bodyClassName="">
-        {rows.length > 0 ? (
+        {shown.length > 0 ? (
           <div className="table-scroll">
             <table className="table">
               <thead>
@@ -113,7 +152,7 @@ export default async function PropertiesPage() {
                 </tr>
               </thead>
               <tbody>
-                {rows.map((row) => (
+                {shown.map((row) => (
                   <tr key={row.id}>
                     <td>
                       <Link

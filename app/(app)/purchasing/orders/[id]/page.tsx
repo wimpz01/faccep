@@ -12,8 +12,17 @@ import { createBillFromOrder } from "@/app/(app)/payables/actions";
 import { BillFromOrderForm } from "@/app/(app)/payables/payables-forms";
 import { round2 } from "@/lib/billing";
 
-import { issuePurchaseOrder, receiveGoods } from "../../actions";
-import { ReceiveForm } from "../../purchasing-forms";
+import {
+  cancelPurchaseOrder,
+  issuePurchaseOrder,
+  receiveGoods,
+  unissuePurchaseOrder,
+} from "../../actions";
+import {
+  CancelOrderForm,
+  ReceiveForm,
+  UnissueOrderForm,
+} from "../../purchasing-forms";
 
 export const metadata: Metadata = { title: "Purchase order" };
 
@@ -59,6 +68,7 @@ export default async function PurchaseOrderDetailPage({
   const canIssue = can(context.permissions, MODULE.purchasingOrders, "approve");
   const canReceive = can(context.permissions, MODULE.purchasingReceiving, "edit");
   const canBill = can(context.permissions, MODULE.payablesInvoices, "edit");
+  const canEditOrder = can(context.permissions, MODULE.purchasingOrders, "edit");
 
   const supabase = await createClient();
   const { data: order, error: orderError } = await supabase
@@ -77,6 +87,7 @@ export default async function PurchaseOrderDetailPage({
   if (!order || order.company_id !== companyId) notFound();
 
   const lines = order.purchase_order_lines ?? [];
+  const hasReceipts = (order.goods_receipts ?? []).length > 0;
   const fullyReceived = lines.every(
     (line) => Number(line.quantity_received) >= Number(line.quantity),
   );
@@ -231,18 +242,53 @@ export default async function PurchaseOrderDetailPage({
         </Card>
       </div>
 
-      {order.status === "draft" && canIssue ? (
+      {order.status === "draft" && (canIssue || canEditOrder) ? (
         <div className="mb-6">
           <Card
             title="Issue to the supplier"
-            description="Receiving is only possible once the order has been issued."
+            description="Receiving is only possible once the order has been issued. Until it goes out, the order can still be cancelled."
           >
-            <form action={issuePurchaseOrder}>
-              <input type="hidden" name="id" value={order.id} />
-              <button type="submit" className="btn btn-primary">
-                Issue order
-              </button>
-            </form>
+            <div className="flex items-start gap-3 flex-wrap">
+              {canIssue ? (
+                <form action={issuePurchaseOrder}>
+                  <input type="hidden" name="id" value={order.id} />
+                  <button type="submit" className="btn btn-primary">
+                    Issue order
+                  </button>
+                </form>
+              ) : null}
+              {canEditOrder ? (
+                <CancelOrderForm
+                  action={cancelPurchaseOrder}
+                  poId={order.id}
+                />
+              ) : null}
+            </div>
+          </Card>
+        </div>
+      ) : null}
+
+      {order.status === "issued" && !hasReceipts && canIssue ? (
+        <div className="mb-6">
+          <Card
+            title="Issued to the supplier"
+            description="Nothing has arrived yet, so the issue can still be taken back. The order returns to draft, where it can be corrected or cancelled."
+          >
+            <UnissueOrderForm
+              action={unissuePurchaseOrder}
+              poId={order.id}
+            />
+          </Card>
+        </div>
+      ) : null}
+
+      {order.status === "cancelled" ? (
+        <div className="mb-6">
+          <Card title="Cancelled">
+            <p className="text-sm muted">
+              Nothing more can be bought on {order.po_no}. It stays on file for
+              the record.
+            </p>
           </Card>
         </div>
       ) : null}
