@@ -1,6 +1,8 @@
 import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
+import { isAuthUnreachable } from "@/lib/auth";
+
 type CookieToSet = { name: string; value: string; options: CookieOptions };
 
 /**
@@ -40,9 +42,14 @@ export async function updateSession(request: NextRequest) {
 
   // Refreshes the auth token. Do not remove -- without it the session expires
   // mid-navigation and Server Components see a signed-out user.
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const { data: userData, error: userError } = await supabase.auth.getUser();
+  const user = userData.user;
+
+  // Supabase auth is a separate hop and drops occasionally. Treating an
+  // unreachable service as "signed out" bounces a working user to the login
+  // page and loses whatever they had typed, so the request is let through and
+  // the page's own guard decides.
+  if (!user && isAuthUnreachable(userError)) return response;
 
   const { pathname } = request.nextUrl;
   const isPublic = PUBLIC_PATHS.some(

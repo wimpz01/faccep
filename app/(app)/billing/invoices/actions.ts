@@ -89,7 +89,7 @@ export async function generateInvoices(
   const { data: periods } = await supabase
     .from("utility_periods")
     .select(
-      "id, location_id, utility, provider_amount, provider_consumption, genset_expense",
+      "id, location_id, utility, provider_amount, provider_consumption, genset_expense, is_locked, locations(code)",
     )
     .eq("company_id", companyId)
     .lte("period_start", monthEnd)
@@ -102,6 +102,58 @@ export async function generateInvoices(
       period,
     ]),
   );
+
+  /**
+   * Both utilities must be measured and declared final before anyone is
+   * billed. A period that is still open can have its provider bill or its
+   * readings changed, and a charge raised off figures that then move is a
+   * re-billing. Locking is the declaration; nothing bills without it.
+   *
+   * The run is refused outright rather than part-completed, so the month is
+   * never half billed.
+   */
+  const blockers: string[] = [];
+  const locationsToBill = new Map<string, string>();
+  for (const contract of contracts) {
+    for (const link of contract.contract_units ?? []) {
+      const location = link.units?.location_id;
+      if (location) locationsToBill.set(location, location);
+    }
+  }
+
+  const { data: billedLocations } = await supabase
+    .from("locations")
+    .select("id, code")
+    .in("id", [...locationsToBill.keys()])
+    .returns<{ id: string; code: string }[]>();
+
+  const locationCode = new Map(
+    (billedLocations ?? []).map((row) => [row.id, row.code]),
+  );
+
+  for (const locationId of locationsToBill.keys()) {
+    for (const utility of ["electric", "water"] as const) {
+      const period = periodByKey.get(`${locationId}:${utility}`);
+      const label = utility === "electric" ? "electricity" : "water";
+      const where = locationCode.get(locationId) ?? "That location";
+
+      if (!period) {
+        blockers.push(
+          `${where} has no ${label} period covering ${monthLabel(monthStart)}. Open it and enter the provider bill and readings first.`,
+        );
+        continue;
+      }
+      if (!period.is_locked) {
+        blockers.push(
+          `${where}'s ${label} period for ${monthLabel(monthStart)} is still open. Lock it once the bill and readings are final — locking is what makes it billable.`,
+        );
+      }
+    }
+  }
+
+  if (blockers.length > 0) {
+    return { error: `Nothing was generated. ${blockers.join(" ")}` };
+  }
 
   // A period charged to tenants is spent. Billing it again would charge the
   // same provider bill twice, so it is withheld from this run and said so.
@@ -449,6 +501,8 @@ type UtilityPeriodRow = {
   provider_amount: string;
   provider_consumption: string;
   genset_expense: string;
+  is_locked: boolean;
+  locations: { code: string } | null;
 };
 
 type ContractForBilling = {

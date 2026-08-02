@@ -13,3 +13,7 @@ next-env.d.ts
 
 # Machine-local Claude Code state: approved commands, local paths.
 .claude/settings.local.json
+
+# Database dumps and scratch files — never publish business data
+bakcup/
+faccep-backup-*.json

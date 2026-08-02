@@ -52,6 +52,40 @@ type PermissionRow = {
 };
 
 /**
+ * A network failure reaching the auth service, as opposed to a straight answer
+ * that there is no session. Supabase names these retryable itself.
+ */
+export function isAuthUnreachable(error: { name?: string; status?: number } | null) {
+  if (!error) return false;
+  return error.name === "AuthRetryableFetchError" || error.status === 0;
+}
+
+/**
+ * Asks who is signed in, retrying a dropped connection before giving up.
+ *
+ * Supabase auth is a separate hop from the database, and it fails on its own
+ * from time to time. Two quick retries turn nearly all of those into a normal
+ * page load rather than an apparent sign-out.
+ */
+type SupabaseServerClient = Awaited<ReturnType<typeof createClient>>;
+type AuthedUser = Awaited<
+  ReturnType<SupabaseServerClient["auth"]["getUser"]>
+>["data"]["user"];
+
+async function getUserWithRetry(
+  supabase: SupabaseServerClient,
+): Promise<{ user: AuthedUser; unreachable: boolean }> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const { data, error } = await supabase.auth.getUser();
+    if (data.user) return { user: data.user, unreachable: false };
+    if (!isAuthUnreachable(error)) return { user: null, unreachable: false };
+    await new Promise((resolve) => setTimeout(resolve, 150 * (attempt + 1)));
+  }
+
+  return { user: null, unreachable: true };
+}
+
+/**
  * Loads the signed-in user, their company memberships, and the resolved
  * permission matrix for the active company.
  *
@@ -62,9 +96,16 @@ export const getSessionContext = cache(
   async (): Promise<SessionContext | null> => {
     const supabase = await createClient();
 
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
+    const { user, unreachable } = await getUserWithRetry(supabase);
+
+    // Not being able to ask is not the same as being told no. Reporting an
+    // unreachable auth service as "signed out" logs a working user out of
+    // their own form, so it is raised as the failure it is.
+    if (unreachable) {
+      throw new Error(
+        "Could not reach the sign-in service. Nothing was changed — try again in a moment.",
+      );
+    }
     if (!user) return null;
 
     const { data: profile } = await supabase
