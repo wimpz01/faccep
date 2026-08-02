@@ -110,12 +110,12 @@ export async function setPaymentTermActive(
 
 const vendorSchema = z.object({
   name: z.string().trim().min(2, "Supplier name is required."),
-  tin: z.string().trim().optional().or(z.literal("")),
-  address: z.string().trim().optional().or(z.literal("")),
-  contact_person: z.string().trim().optional().or(z.literal("")),
-  contact_number: z.string().trim().optional().or(z.literal("")),
-  email: z.string().trim().email("Enter a valid email.").optional().or(z.literal("")),
-  payment_terms_id: z.string().uuid().optional().or(z.literal("")),
+  tin: z.string().trim().nullish().or(z.literal("")),
+  address: z.string().trim().nullish().or(z.literal("")),
+  contact_person: z.string().trim().nullish().or(z.literal("")),
+  contact_number: z.string().trim().nullish().or(z.literal("")),
+  email: z.string().trim().email("Enter a valid email.").nullish().or(z.literal("")),
+  payment_terms_id: z.string().uuid().nullish().or(z.literal("")),
   withholding: z.enum(["none", "goods", "services"]).default("none"),
 });
 

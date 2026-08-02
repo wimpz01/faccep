@@ -19,8 +19,8 @@ const paymentSchema = z.object({
   payment_mode: z.enum(["cash", "gcash", "check", "bank_transfer"]),
   payment_date: z.string().min(10, "Choose the payment date."),
   amount: z.coerce.number().positive("Enter an amount greater than zero."),
-  reference: z.string().trim().optional().or(z.literal("")),
-  notes: z.string().trim().optional().or(z.literal("")),
+  reference: z.string().trim().nullish().or(z.literal("")),
+  notes: z.string().trim().nullish().or(z.literal("")),
   check_bank: z.string().trim().nullish().transform((value) => value ?? ""),
   check_date: z.string().trim().nullish().transform((value) => value ?? ""),
 });
@@ -240,7 +240,7 @@ const pdcSchema = z.object({
   bank: z.string().trim().min(1, "Bank is required."),
   amount: z.coerce.number().positive("Enter an amount greater than zero."),
   maturity_date: z.string().min(10, "Choose the maturity date."),
-  notes: z.string().trim().optional().or(z.literal("")),
+  notes: z.string().trim().nullish().or(z.literal("")),
 });
 
 export async function recordPdc(

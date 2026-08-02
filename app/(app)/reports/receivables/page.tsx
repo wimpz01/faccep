@@ -107,7 +107,7 @@ export default async function ReceivablesReport() {
                           key={bucket}
                           className="text-right tabular-nums"
                           style={
-                            bucket === "90+" && row.buckets[bucket] > 0
+                            bucket === "120+" && row.buckets[bucket] > 0
                               ? { color: "var(--danger)" }
                               : undefined
                           }

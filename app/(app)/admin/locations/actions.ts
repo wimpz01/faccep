@@ -24,7 +24,7 @@ const locationSchema = z.object({
     "vacant_lot",
     "apartment",
   ]),
-  address: z.string().trim().optional().or(z.literal("")),
+  address: z.string().trim().nullish().or(z.literal("")),
 });
 
 function readForm(formData: FormData) {

@@ -35,7 +35,7 @@ const REPORTS: {
   },
   {
     href: "/reports/payables",
-    title: "Vendor aging",
+    title: "Supplier aging",
     description: "What is owed to suppliers and how overdue it is.",
     moduleKey: MODULE.reportsExpenses,
   },

@@ -83,6 +83,20 @@ body {
   box-shadow: var(--shadow-card);
 }
 
+/* A tile that leads somewhere lifts slightly, so it reads as a way in. */
+.stat-tile-link {
+  text-decoration: none;
+  color: inherit;
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.stat-tile-link:hover {
+  border-color: var(--color-brand-600);
+  box-shadow: var(--shadow-card-hover, 0 4px 14px rgb(0 0 0 / 0.1));
+}
+
 .card-header {
   padding: 1rem 1.25rem;
   border-bottom: 1px solid var(--border);
@@ -309,6 +323,11 @@ body {
   font-weight: 700;
 }
 
+/* A masthead that belongs on paper but only repeats the page on screen. */
+.print-only {
+  display: none;
+}
+
 .doc-editable {
   outline: 1px dashed #9ca3af;
   outline-offset: 3px;
@@ -331,6 +350,44 @@ body {
 
   .no-print {
     display: none !important;
+  }
+
+  .print-only {
+    display: block !important;
+  }
+
+  /* Reports print as tables on white, not as app cards. */
+  .card {
+    border: none !important;
+    box-shadow: none !important;
+    background: #ffffff !important;
+    break-inside: auto;
+  }
+
+  .table-scroll {
+    overflow: visible !important;
+  }
+
+  .table th,
+  .table td {
+    border-color: #d1d5db !important;
+  }
+
+  thead {
+    display: table-header-group;
+  }
+
+  tr {
+    break-inside: avoid;
+  }
+
+  main {
+    padding: 0 !important;
+  }
+
+  main > div {
+    max-width: none !important;
+    padding: 0 !important;
   }
 
   .doc-sheet {

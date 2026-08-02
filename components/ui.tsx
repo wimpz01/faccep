@@ -1,3 +1,4 @@
+import Link from "next/link";
 import type { ReactNode } from "react";
 
 export function PageHeader({
@@ -103,30 +104,80 @@ export function TabBar({
   );
 }
 
+/**
+ * A headline figure. Given an href it becomes the way into whatever it counts,
+ * so a number on a dashboard is never a dead end.
+ */
 export function StatTile({
   label,
   value,
   hint,
   tone = "default",
+  href,
 }: {
   label: string;
   value: string | number;
   hint?: string;
   tone?: "default" | "money";
+  href?: string;
+}) {
+  const body = (
+    <div className="card-body">
+      <p className="text-[0.7rem] font-bold uppercase tracking-[0.06em] muted">
+        {label}
+      </p>
+      <p
+        className="text-3xl font-bold mt-1 tabular-nums tracking-tight"
+        style={tone === "money" ? { color: "var(--color-gold-500)" } : undefined}
+      >
+        {value}
+      </p>
+      {hint ? <p className="text-xs muted mt-1">{hint}</p> : null}
+      {href ? (
+        <p
+          className="text-xs mt-2 font-semibold"
+          style={{ color: "var(--color-brand-600)" }}
+        >
+          View detail →
+        </p>
+      ) : null}
+    </div>
+  );
+
+  if (!href) return <div className="card">{body}</div>;
+
+  return (
+    <Link href={href} className="card stat-tile-link" style={{ display: "block" }}>
+      {body}
+    </Link>
+  );
+}
+
+/**
+ * Says which subset of a list is on screen, and how to get back to all of it.
+ * Shown when a dashboard tile has been clicked through to its detail.
+ */
+export function FilterNote({
+  label,
+  count,
+  clearHref,
+}: {
+  label: string;
+  count: number;
+  clearHref: string;
 }) {
   return (
-    <div className="card">
-      <div className="card-body">
-        <p className="text-[0.7rem] font-bold uppercase tracking-[0.06em] muted">
-          {label}
+    <div
+      className="card mb-4 no-print"
+      style={{ borderColor: "var(--color-brand-600)" }}
+    >
+      <div className="card-body flex items-center justify-between gap-3 flex-wrap">
+        <p className="text-sm">
+          Showing <strong>{label}</strong> — {count} record(s).
         </p>
-        <p
-          className="text-3xl font-bold mt-1 tabular-nums tracking-tight"
-          style={tone === "money" ? { color: "var(--color-gold-500)" } : undefined}
-        >
-          {value}
-        </p>
-        {hint ? <p className="text-xs muted mt-1">{hint}</p> : null}
+        <Link href={clearHref} className="btn btn-secondary btn-sm">
+          Show all
+        </Link>
       </div>
     </div>
   );

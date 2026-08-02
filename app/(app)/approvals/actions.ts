@@ -138,6 +138,22 @@ async function applyEffect(request: PendingRequest): Promise<string | null> {
     return error?.message ?? null;
   }
 
+  /**
+   * Approving a voucher releases it, and releasing is what posts it to the
+   * ledger. Approved-but-not-posted would be a state nobody could explain, so
+   * the two happen together.
+   */
+  if (request.entity_table === "check_vouchers" && request.action === "approve") {
+    const { error } = await supabase
+      .from("check_vouchers")
+      .update({
+        status: "released",
+        released_at: new Date().toISOString(),
+      })
+      .eq("id", request.entity_id);
+    return error?.message ?? null;
+  }
+
   if (request.entity_table === "vendors" && request.action === "approve") {
     const { error } = await supabase
       .from("vendors")

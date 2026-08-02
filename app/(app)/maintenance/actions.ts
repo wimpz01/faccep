@@ -15,13 +15,13 @@ export type ActionState = { error?: string; success?: string };
 
 const jobSchema = z.object({
   title: z.string().trim().min(3, "Describe the job in a few words."),
-  description: z.string().trim().optional().or(z.literal("")),
-  location_id: z.string().uuid().optional().or(z.literal("")),
-  unit_id: z.string().uuid().optional().or(z.literal("")),
+  description: z.string().trim().nullish().or(z.literal("")),
+  location_id: z.string().uuid().nullish().or(z.literal("")),
+  unit_id: z.string().uuid().nullish().or(z.literal("")),
   job_kind: z.enum(["in_house", "contracted"]),
-  vendor_id: z.string().uuid().optional().or(z.literal("")),
-  assigned_to: z.string().trim().optional().or(z.literal("")),
-  scheduled_for: z.string().optional().or(z.literal("")),
+  vendor_id: z.string().uuid().nullish().or(z.literal("")),
+  assigned_to: z.string().trim().nullish().or(z.literal("")),
+  scheduled_for: z.string().nullish().or(z.literal("")),
   contract_amount: z.coerce.number().min(0),
 });
 

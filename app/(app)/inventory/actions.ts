@@ -42,7 +42,7 @@ export async function createCategory(
 
 const itemSchema = z.object({
   name: z.string().trim().min(2, "Item name is required."),
-  category_id: z.string().uuid().optional().or(z.literal("")),
+  category_id: z.string().uuid().nullish().or(z.literal("")),
   unit_of_measure: z.string().trim().min(1, "Unit of measure is required."),
   reorder_level: z.coerce.number().min(0),
   unit_cost: z.coerce.number().min(0),

@@ -26,7 +26,10 @@ type OrderDetail = {
   expected_date: string | null;
   total: string;
   notes: string | null;
-  vendors: { name: string; payment_terms: string | null } | null;
+  vendors: {
+    name: string;
+    payment_terms: { name: string; days: number } | null;
+  } | null;
   purchase_requests: { request_no: string } | null;
   locations: { code: string; name: string } | null;
   purchase_order_lines: {
@@ -58,16 +61,19 @@ export default async function PurchaseOrderDetailPage({
   const canBill = can(context.permissions, MODULE.payablesInvoices, "edit");
 
   const supabase = await createClient();
-  const { data: order } = await supabase
+  const { data: order, error: orderError } = await supabase
     .from("purchase_orders")
     .select(
-      `*, vendors(name, payment_terms), purchase_requests(request_no), locations(code, name),
+      `*, vendors(name, payment_terms(name, days)), purchase_requests(request_no), locations(code, name),
        purchase_order_lines(id, description, quantity, unit_price, amount, quantity_received),
        goods_receipts(id, receipt_no, received_date, notes)`,
     )
     .eq("id", id)
     .maybeSingle<OrderDetail>();
 
+  // A failed query is not a missing order. Letting it fall through to
+  // notFound() turns a broken read into a 404 and hides why.
+  if (orderError) throw new Error(`Purchase order ${id}: ${orderError.message}`);
   if (!order || order.company_id !== companyId) notFound();
 
   const lines = order.purchase_order_lines ?? [];
@@ -116,9 +122,17 @@ export default async function PurchaseOrderDetailPage({
             : "Company-wide"
         }`}
         action={
-          <Link href="/purchasing/orders" className="btn btn-secondary btn-sm">
-            Back
-          </Link>
+          <div className="flex gap-2">
+            <Link href="/purchasing/orders" className="btn btn-secondary btn-sm">
+              Back
+            </Link>
+            <Link
+              href={`/purchasing/orders/${order.id}/print`}
+              className="btn btn-primary btn-sm"
+            >
+              Print
+            </Link>
+          </div>
         }
       />
 
@@ -157,7 +171,9 @@ export default async function PurchaseOrderDetailPage({
               {formatDate(order.expected_date)}
             </p>
             {order.vendors?.payment_terms ? (
-              <p className="text-xs muted">Terms: {order.vendors.payment_terms}</p>
+              <p className="text-xs muted">
+                Terms: {order.vendors.payment_terms.name}
+              </p>
             ) : null}
           </div>
         </div>
@@ -347,6 +363,7 @@ export default async function PurchaseOrderDetailPage({
                   <th>Receipt</th>
                   <th>Date</th>
                   <th>Notes</th>
+                  <th className="text-right">Bill it</th>
                 </tr>
               </thead>
               <tbody>
@@ -355,6 +372,18 @@ export default async function PurchaseOrderDetailPage({
                     <td className="text-sm font-medium">{receipt.receipt_no}</td>
                     <td className="text-xs">{formatDate(receipt.received_date)}</td>
                     <td className="text-xs">{receipt.notes ?? "—"}</td>
+                    <td className="text-right">
+                      {canBill ? (
+                        <Link
+                          href={`/payables?receipt=${receipt.id}`}
+                          className="btn btn-secondary btn-sm"
+                        >
+                          Create supplier invoice
+                        </Link>
+                      ) : (
+                        <span className="text-xs muted">—</span>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>

@@ -46,7 +46,7 @@ const accountSchema = z.object({
   code: z.string().trim().min(1, "Account code is required."),
   name: z.string().trim().min(2, "Account name is required."),
   account_type: z.enum(["asset", "liability", "equity", "income", "expense"]),
-  description: z.string().trim().optional().or(z.literal("")),
+  description: z.string().trim().nullish().or(z.literal("")),
 });
 
 export async function createAccount(

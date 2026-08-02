@@ -3,19 +3,26 @@ import type { ReactNode } from "react";
 
 import { PrintButton } from "@/components/print-button";
 import { PageHeader } from "@/components/ui";
+import { getSessionContext } from "@/lib/auth";
+import { formatDate } from "@/lib/format";
 
 /**
  * Common chrome for every report: heading, an optional date-range filter, and
  * the print control. The filter posts back with GET so the range lives in the
  * URL and can be bookmarked or shared.
+ *
+ * On paper the screen chrome is dropped and replaced by a masthead, because a
+ * printed report that names neither the company, the report nor the date it
+ * was taken is not evidence of anything.
  */
-export function ReportShell({
+export async function ReportShell({
   title,
   description,
   from,
   to,
   showRange = true,
   extraFilters,
+  scopeNote,
   children,
 }: {
   title: string;
@@ -24,10 +31,41 @@ export function ReportShell({
   to?: string;
   showRange?: boolean;
   extraFilters?: ReactNode;
+  /** What the report was narrowed to, named on the printed copy. */
+  scopeNote?: string;
   children: ReactNode;
 }) {
+  const context = await getSessionContext();
+  const companyName = context?.activeCompany?.companyName ?? "";
+  const today = new Date().toISOString().slice(0, 10);
+
   return (
     <>
+      <div className="print-only" style={{ marginBottom: "1rem" }}>
+        {companyName ? (
+          <p style={{ fontWeight: 700, marginBottom: "0.15rem" }}>{companyName}</p>
+        ) : null}
+        <h1
+          style={{
+            fontSize: "1.15rem",
+            fontWeight: 700,
+            textTransform: "uppercase",
+            letterSpacing: "0.06em",
+          }}
+        >
+          {title}
+        </h1>
+        {scopeNote ? (
+          <p style={{ fontSize: "0.85rem", fontWeight: 600 }}>{scopeNote}</p>
+        ) : null}
+        <p style={{ fontSize: "0.8rem" }}>
+          {showRange && from && to
+            ? `For ${formatDate(from)} to ${formatDate(to)}`
+            : `As at ${formatDate(today)}`}
+          {` · printed ${formatDate(today)}`}
+        </p>
+      </div>
+
       <div className="no-print">
         <PageHeader
           title={title}
@@ -42,34 +80,38 @@ export function ReportShell({
           }
         />
 
-        {showRange ? (
+        {showRange || extraFilters ? (
           <div className="card mb-5">
             <div className="card-body">
               <form method="get" className="grid gap-3 sm:grid-cols-5 items-end">
-                <div>
-                  <label className="label" htmlFor="from">
-                    From
-                  </label>
-                  <input
-                    id="from"
-                    name="from"
-                    type="date"
-                    className="input"
-                    defaultValue={from}
-                  />
-                </div>
-                <div>
-                  <label className="label" htmlFor="to">
-                    To
-                  </label>
-                  <input
-                    id="to"
-                    name="to"
-                    type="date"
-                    className="input"
-                    defaultValue={to}
-                  />
-                </div>
+                {showRange ? (
+                  <>
+                    <div>
+                      <label className="label" htmlFor="from">
+                        From
+                      </label>
+                      <input
+                        id="from"
+                        name="from"
+                        type="date"
+                        className="input"
+                        defaultValue={from}
+                      />
+                    </div>
+                    <div>
+                      <label className="label" htmlFor="to">
+                        To
+                      </label>
+                      <input
+                        id="to"
+                        name="to"
+                        type="date"
+                        className="input"
+                        defaultValue={to}
+                      />
+                    </div>
+                  </>
+                ) : null}
                 {extraFilters}
                 <div>
                   <button type="submit" className="btn btn-primary">
@@ -104,7 +146,15 @@ export function agingBucket(dueDate: string) {
   if (days <= 30) return "1-30";
   if (days <= 60) return "31-60";
   if (days <= 90) return "61-90";
-  return "90+";
+  if (days <= 120) return "91-120";
+  return "120+";
 }
 
-export const AGING_BUCKETS = ["current", "1-30", "31-60", "61-90", "90+"] as const;
+export const AGING_BUCKETS = [
+  "current",
+  "1-30",
+  "31-60",
+  "61-90",
+  "91-120",
+  "120+",
+] as const;

@@ -87,11 +87,35 @@ export default async function AppLayout({
   if (can(permissions, MODULE.purchasingVendors, "view")) {
     purchasing.push({ href: "/purchasing/vendors", label: "Suppliers" });
   }
-  if (can(permissions, MODULE.payablesInvoices, "view")) {
-    purchasing.push({ href: "/payables", label: "Payables" });
-  }
   if (purchasing.length > 0) {
     groups.push({ group: "Purchasing", items: purchasing });
+  }
+
+  // Payables stands beside Purchasing rather than inside it: buying and paying
+  // are separate jobs, usually separate people, and separate permissions.
+  const payables: NavItem[] = [];
+  if (can(permissions, MODULE.payablesInvoices, "view")) {
+    payables.push({ href: "/payables?tab=invoices", label: "Supplier invoices" });
+  }
+  if (can(permissions, MODULE.payablesInvoices, "edit")) {
+    payables.push({ href: "/payables?tab=record", label: "Record invoice" });
+  }
+  if (can(permissions, MODULE.payablesInvoices, "view")) {
+    payables.push({
+      href: "/payables?tab=receipts",
+      label: "Received, not billed",
+    });
+  }
+  if (can(permissions, MODULE.payablesVouchers, "view")) {
+    payables.push({ href: "/payables?tab=vouchers", label: "Cheque vouchers" });
+  }
+  // The aging report lives under Payables as well as in All reports: it is
+  // read while working the ledger, not only at month end.
+  if (can(permissions, MODULE.reportsExpenses, "view")) {
+    payables.push({ href: "/reports/payables", label: "Supplier aging" });
+  }
+  if (payables.length > 0) {
+    groups.push({ group: "Payables", items: payables });
   }
 
   const accounting: NavItem[] = [];

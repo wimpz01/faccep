@@ -27,7 +27,7 @@ const newUserSchema = z.object({
   password: z
     .string()
     .min(6, "Use at least 6 characters for the initial password."),
-  role_id: z.string().uuid().optional().or(z.literal("")),
+  role_id: z.string().uuid().nullish().or(z.literal("")),
   is_company_admin: z.boolean(),
   status: z.enum(["active", "inactive"]),
 });

@@ -12,11 +12,11 @@ export type ActionState = { error?: string; success?: string };
 
 const companySchema = z.object({
   name: z.string().trim().min(2, "Company name is required."),
-  legal_name: z.string().trim().optional().or(z.literal("")),
-  tin: z.string().trim().optional().or(z.literal("")),
-  address: z.string().trim().optional().or(z.literal("")),
-  contact_person: z.string().trim().optional().or(z.literal("")),
-  contact_number: z.string().trim().optional().or(z.literal("")),
+  legal_name: z.string().trim().nullish().or(z.literal("")),
+  tin: z.string().trim().nullish().or(z.literal("")),
+  address: z.string().trim().nullish().or(z.literal("")),
+  contact_person: z.string().trim().nullish().or(z.literal("")),
+  contact_number: z.string().trim().nullish().or(z.literal("")),
   email: z
     .string()
     .trim()

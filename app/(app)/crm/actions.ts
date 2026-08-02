@@ -13,15 +13,15 @@ export type ActionState = { error?: string; success?: string };
 
 const inquirySchema = z.object({
   contact_person: z.string().trim().min(2, "Who got in touch?"),
-  company_name: z.string().trim().optional().or(z.literal("")),
-  mobile_number: z.string().trim().optional().or(z.literal("")),
-  email: z.string().trim().email("Enter a valid email.").optional().or(z.literal("")),
-  requirement: z.string().trim().optional().or(z.literal("")),
-  unit_id: z.string().uuid().optional().or(z.literal("")),
-  source: z.string().trim().optional().or(z.literal("")),
-  follow_up_on: z.string().optional().or(z.literal("")),
-  proposed_rent: z.string().optional().or(z.literal("")),
-  proposed_term_years: z.string().optional().or(z.literal("")),
+  company_name: z.string().trim().nullish().or(z.literal("")),
+  mobile_number: z.string().trim().nullish().or(z.literal("")),
+  email: z.string().trim().email("Enter a valid email.").nullish().or(z.literal("")),
+  requirement: z.string().trim().nullish().or(z.literal("")),
+  unit_id: z.string().uuid().nullish().or(z.literal("")),
+  source: z.string().trim().nullish().or(z.literal("")),
+  follow_up_on: z.string().nullish().or(z.literal("")),
+  proposed_rent: z.string().nullish().or(z.literal("")),
+  proposed_term_years: z.string().nullish().or(z.literal("")),
 });
 
 export async function createInquiry(

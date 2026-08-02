@@ -13,7 +13,7 @@ export type ActionState = { error?: string; success?: string };
 
 const roleSchema = z.object({
   name: z.string().trim().min(2, "Role name is required."),
-  description: z.string().trim().optional().or(z.literal("")),
+  description: z.string().trim().nullish().or(z.literal("")),
 });
 
 export async function createRole(

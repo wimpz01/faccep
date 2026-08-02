@@ -1,7 +1,13 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 
-import { Card, EmptyState, PageHeader, StatTile } from "@/components/ui";
+import {
+  Card,
+  EmptyState,
+  FilterNote,
+  PageHeader,
+  StatTile,
+} from "@/components/ui";
 import { requirePermission } from "@/lib/auth";
 import { formatDate, money } from "@/lib/format";
 import { MODULE, can } from "@/lib/permissions";
@@ -28,9 +34,9 @@ type InvoiceRow = {
 export default async function InvoicesPage({
   searchParams,
 }: {
-  searchParams: Promise<{ status?: string }>;
+  searchParams: Promise<{ status?: string; view?: string }>;
 }) {
-  const { status } = await searchParams;
+  const { status, view } = await searchParams;
   const context = await requirePermission(MODULE.billingInvoices, "view");
   const companyId = context.activeCompany!.companyId;
   const canEdit = can(context.permissions, MODULE.billingInvoices, "edit");
@@ -68,6 +74,10 @@ export default async function InvoicesPage({
       row.due_date < today,
   );
 
+  // Overdue is not a status, so it narrows the list here rather than in the
+  // query the status buttons drive.
+  const shown = view === "overdue" ? overdue : rows;
+
   return (
     <>
       <PageHeader
@@ -81,19 +91,35 @@ export default async function InvoicesPage({
           value={money(outstanding)}
           hint="Released and unpaid"
           tone="money"
+          href="/billing/invoices?status=released"
         />
         <StatTile
           label="Overdue"
           value={overdue.length}
           hint="Past the due date"
+          href="/billing/invoices?view=overdue"
         />
         <StatTile
           label="Drafts"
           value={rows.filter((row) => row.status === "draft").length}
           hint="Not yet released"
+          href="/billing/invoices?status=draft"
         />
-        <StatTile label="Total shown" value={rows.length} hint="Most recent 200" />
+        <StatTile
+          label="Total shown"
+          value={rows.length}
+          hint="Most recent 200"
+          href="/billing/invoices"
+        />
       </div>
+
+      {view === "overdue" ? (
+        <FilterNote
+          label="invoices past their due date"
+          count={shown.length}
+          clearHref="/billing/invoices"
+        />
+      ) : null}
 
       {canEdit ? (
         <div className="mb-6">
@@ -130,7 +156,7 @@ export default async function InvoicesPage({
         }
         bodyClassName=""
       >
-        {rows.length > 0 ? (
+        {shown.length > 0 ? (
           <div className="table-scroll">
             <table className="table">
               <thead>
@@ -145,7 +171,7 @@ export default async function InvoicesPage({
                 </tr>
               </thead>
               <tbody>
-                {rows.map((invoice) => {
+                {shown.map((invoice) => {
                   const balance =
                     Number(invoice.total) -
                     Number(invoice.amount_paid) -

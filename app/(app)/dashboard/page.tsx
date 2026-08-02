@@ -287,6 +287,7 @@ export default async function DashboardPage() {
             value={money(collected)}
             hint="Posted payments"
             tone="money"
+            href="/reports/collections"
           />
         ) : null}
         {can(permissions, MODULE.billingInvoices, "view") ? (
@@ -294,6 +295,7 @@ export default async function DashboardPage() {
             label="Receivables"
             value={money(receivables)}
             hint={`${withBalance.length} open invoice(s)`}
+            href="/reports/receivables"
           />
         ) : null}
         {seeNotifications ? (

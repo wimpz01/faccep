@@ -112,6 +112,21 @@ export default async function FinancialStatementsPage({
     (row) => Number(row.debit_total) !== 0 || Number(row.credit_total) !== 0,
   );
 
+  /** Every figure on a statement is a way into the entries behind it. */
+  function AccountLink({ row }: { row: TrialRow }) {
+    return (
+      <Link
+        href={`/accounting/accounts/${row.account_id}?from=${from}&to=${to}`}
+        style={{ color: "inherit" }}
+      >
+        <span className="tabular-nums muted">{row.code}</span>{" "}
+        <span style={{ color: "var(--color-brand-600)", fontWeight: 500 }}>
+          {row.name}
+        </span>
+      </Link>
+    );
+  }
+
   function Section({
     title,
     rows,
@@ -132,7 +147,7 @@ export default async function FinancialStatementsPage({
           rows.map((row) => (
             <tr key={row.account_id}>
               <td className="text-sm" style={{ paddingLeft: "1.5rem" }}>
-                <span className="tabular-nums muted">{row.code}</span> {row.name}
+                <AccountLink row={row} />
               </td>
               <td className="text-right tabular-nums">{money(row.balance)}</td>
             </tr>
@@ -258,7 +273,7 @@ export default async function FinancialStatementsPage({
                   {equity.map((row) => (
                     <tr key={row.account_id}>
                       <td className="text-sm" style={{ paddingLeft: "1.5rem" }}>
-                        <span className="tabular-nums muted">{row.code}</span> {row.name}
+                        <AccountLink row={row} />
                       </td>
                       <td className="text-right tabular-nums">{money(row.balance)}</td>
                     </tr>
@@ -330,8 +345,7 @@ export default async function FinancialStatementsPage({
                     .map((row) => (
                       <tr key={row.account_id}>
                         <td className="text-sm">
-                          <span className="tabular-nums muted">{row.code}</span>{" "}
-                          {row.name}
+                          <AccountLink row={row} />
                         </td>
                         <td className="text-right tabular-nums">
                           {Number(row.debit_total) ? money(row.debit_total) : ""}

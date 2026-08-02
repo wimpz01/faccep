@@ -27,16 +27,16 @@ const optionalNumber = z
 
 const unitSchema = z.object({
   code: z.string().trim().min(1, "Unit code is required.").max(30),
-  floor: z.string().trim().optional().or(z.literal("")),
+  floor: z.string().trim().nullish().or(z.literal("")),
   area_sqm: optionalNumber,
   monthly_rate: z.coerce
     .number({ invalid_type_error: "Enter a monthly rate." })
     .min(0, "Monthly rate cannot be negative."),
-  description: z.string().trim().optional().or(z.literal("")),
+  description: z.string().trim().nullish().or(z.literal("")),
   // One entry per appliance the form has added; absent means none.
   appliances: z.array(z.string()).default([]),
-  water_meter_serial: z.string().trim().optional().or(z.literal("")),
-  electric_meter_serial: z.string().trim().optional().or(z.literal("")),
+  water_meter_serial: z.string().trim().nullish().or(z.literal("")),
+  electric_meter_serial: z.string().trim().nullish().or(z.literal("")),
 });
 
 function readForm(formData: FormData) {

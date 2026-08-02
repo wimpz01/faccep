@@ -13,19 +13,19 @@ export type ActionState = { error?: string; success?: string };
 
 const tenantSchema = z.object({
   company_name: z.string().trim().min(2, "Company name is required."),
-  address: z.string().trim().optional().or(z.literal("")),
-  company_number: z.string().trim().optional().or(z.literal("")),
-  contact_person: z.string().trim().optional().or(z.literal("")),
-  mobile_number: z.string().trim().optional().or(z.literal("")),
+  address: z.string().trim().nullish().or(z.literal("")),
+  company_number: z.string().trim().nullish().or(z.literal("")),
+  contact_person: z.string().trim().nullish().or(z.literal("")),
+  mobile_number: z.string().trim().nullish().or(z.literal("")),
   email: z
     .string()
     .trim()
     .email("Enter a valid email address.")
     .optional()
     .or(z.literal("")),
-  tin: z.string().trim().optional().or(z.literal("")),
+  tin: z.string().trim().nullish().or(z.literal("")),
   is_vatable: z.boolean(),
-  notes: z.string().trim().optional().or(z.literal("")),
+  notes: z.string().trim().nullish().or(z.literal("")),
 });
 
 function readForm(formData: FormData) {

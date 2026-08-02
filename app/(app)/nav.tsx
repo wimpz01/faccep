@@ -1,13 +1,24 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { signOut } from "@/app/login/actions";
 import { setActiveCompany } from "./actions";
 
-export type NavItem = { href: string; label: string };
+export type NavItem = {
+  href: string;
+  label: string;
+  /**
+   * Sections within the page, shown only while that page is open.
+   *
+   * They point at the page's own tabs, so the sidebar and the tab bar are the
+   * same navigation rather than two competing ones. Kept out of the tree until
+   * the parent is active, or every page's internals would crowd the sidebar.
+   */
+  children?: NavItem[];
+};
 export type NavGroup = { group: string; items: NavItem[] };
 
 export type NavCompany = { id: string; name: string };
@@ -59,13 +70,15 @@ export function AppNav({
   roleName: string;
 }) {
   const pathname = usePathname();
+  const searchParams = useSearchParams();
   const [open, setOpen] = useState(false);
 
   // The section holding the current page drives which drawer starts open, and
   // re-opens it after navigating somewhere the user had collapsed.
   const activeGroup =
-    groups.find(({ items }) => items.some((item) => isActive(pathname, item.href)))
-      ?.group ?? null;
+    groups.find(({ items }) =>
+      items.some((item) => isActive(pathname, item.href.split("?")[0])),
+    )?.group ?? null;
 
   const [expanded, setExpanded] = useState<string[]>(
     activeGroup ? [activeGroup] : [],
@@ -78,8 +91,34 @@ export function AppNav({
     );
   }, [activeGroup]);
 
-  function itemLink(item: NavItem, indented: boolean) {
-    const active = isActive(pathname, item.href);
+  /** The ?tab= a child link points at, if any. */
+  function tabOf(href: string) {
+    return href.split("?tab=")[1] ?? null;
+  }
+
+  /**
+   * Whether an entry is the one being looked at.
+   *
+   * Entries that name a ?tab= all share one path, so the pathname alone cannot
+   * tell them apart -- without this every tab of a page lights up at once. The
+   * first tab entry for a path is that page's default view, and is the one lit
+   * when the URL names no tab.
+   */
+  function isCurrent(item: NavItem, siblings: NavItem[]) {
+    const base = item.href.split("?")[0];
+    if (!isActive(pathname, base)) return false;
+
+    const tab = tabOf(item.href);
+    if (tab === null) return true;
+
+    const first = siblings.find(
+      (row) => row.href.split("?")[0] === base && tabOf(row.href) !== null,
+    );
+    return (searchParams.get("tab") ?? tabOf(first?.href ?? "")) === tab;
+  }
+
+  function itemLink(item: NavItem, indented: boolean, siblings: NavItem[]) {
+    const active = isCurrent(item, siblings);
     return (
       <Link
         href={item.href}
@@ -98,13 +137,52 @@ export function AppNav({
     );
   }
 
+  /** An entry plus, while it is open, the sections inside it. */
+  function itemBlock(item: NavItem, indented: boolean, siblings: NavItem[]) {
+    const onThisPage = isActive(pathname, item.href.split("?")[0]);
+    const children = onThisPage ? (item.children ?? []) : [];
+    // The first child is the page's default view, so it is the one lit when no
+    // tab is named in the URL.
+    const currentTab = searchParams.get("tab") ?? tabOf(children[0]?.href ?? "");
+
+    return (
+      <div key={item.href}>
+        {itemLink(item, indented, siblings)}
+        {children.length > 0 ? (
+          <ul className="flex flex-col gap-0.5 mt-0.5 mb-1">
+            {children.map((child) => {
+              const on = tabOf(child.href) === currentTab;
+              return (
+                <li key={child.href}>
+                  <Link
+                    href={child.href}
+                    onClick={() => setOpen(false)}
+                    className="block rounded-lg py-1.5 text-xs"
+                    style={{
+                      paddingLeft: indented ? "2.25rem" : "1.5rem",
+                      paddingRight: "0.75rem",
+                      color: on ? "var(--color-brand-600)" : "var(--text)",
+                      fontWeight: on ? 600 : 400,
+                    }}
+                  >
+                    {child.label}
+                  </Link>
+                </li>
+              );
+            })}
+          </ul>
+        ) : null}
+      </div>
+    );
+  }
+
   const links = (
     <nav className="flex flex-col gap-1">
       {groups.map(({ group, items }) => {
         // A section with a single destination is the destination -- collapsing
         // it would hide one link behind one click.
         if (items.length === 1) {
-          return <div key={group}>{itemLink(items[0], false)}</div>;
+          return <div key={group}>{itemBlock(items[0], false, items)}</div>;
         }
 
         const isOpen = expanded.includes(group);
@@ -141,7 +219,7 @@ export function AppNav({
             {isOpen ? (
               <ul id={panelId} className="flex flex-col gap-0.5 mt-0.5 mb-1">
                 {items.map((item) => (
-                  <li key={item.href}>{itemLink(item, true)}</li>
+                  <li key={item.href}>{itemBlock(item, true, items)}</li>
                 ))}
               </ul>
             ) : null}
@@ -155,7 +233,7 @@ export function AppNav({
     <>
       {/* Mobile bar */}
       <header
-        className="lg:hidden sticky top-0 z-30 flex items-center justify-between gap-3 px-4 h-14 border-b"
+        className="no-print lg:hidden sticky top-0 z-30 flex items-center justify-between gap-3 px-4 h-14 border-b"
         style={{ background: "var(--surface)", borderColor: "var(--border)" }}
       >
         <button
@@ -177,7 +255,7 @@ export function AppNav({
 
       <aside
         id="app-sidebar"
-        className={`${
+        className={`no-print ${
           open ? "block" : "hidden"
         } lg:block lg:fixed lg:inset-y-0 lg:left-0 lg:w-64 border-r p-4 overflow-y-auto`}
         style={{ background: "var(--surface)", borderColor: "var(--border)" }}
