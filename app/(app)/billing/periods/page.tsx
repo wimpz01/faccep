@@ -22,6 +22,7 @@ type PeriodRow = {
   provider_consumption: string;
   genset_expense: string;
   is_locked: boolean;
+  invoice_lines: { invoices: { status: string } | null }[];
   locations: { code: string; name: string } | null;
   meter_readings: { count: number }[];
 };
@@ -36,7 +37,7 @@ export default async function UtilityPeriodsPage() {
     supabase
       .from("utility_periods")
       .select(
-        "id, utility, period_start, period_end, provider_amount, provider_consumption, genset_expense, is_locked, locations(code, name), meter_readings(count)",
+        "id, utility, period_start, period_end, provider_amount, provider_consumption, genset_expense, is_locked, locations(code, name), meter_readings(count), invoice_lines(invoices(status))",
       )
       .eq("company_id", companyId)
       .order("period_start", { ascending: false })
@@ -48,6 +49,18 @@ export default async function UtilityPeriodsPage() {
       .eq("is_active", true)
       .order("code"),
   ]);
+
+  // A period charged to a live invoice is spent: it cannot be billed again and
+  // its figures can no longer be edited.
+  const billedPeriods = new Set(
+    (periods ?? [])
+      .filter((period) =>
+        (period.invoice_lines ?? []).some(
+          (line) => line.invoices && line.invoices.status !== "cancelled",
+        ),
+      )
+      .map((period) => period.id),
+  );
 
   return (
     <>
@@ -128,7 +141,18 @@ export default async function UtilityPeriodsPage() {
                         {period.meter_readings?.[0]?.count ?? 0}
                       </td>
                       <td>
-                        {period.is_locked ? (
+                        {billedPeriods.has(period.id) ? (
+                          <span
+                            className="badge"
+                            style={{
+                              background: "var(--color-brand-600)",
+                              color: "#fff",
+                            }}
+                            title="Charged to tenants; it cannot be billed again"
+                          >
+                            billed
+                          </span>
+                        ) : period.is_locked ? (
                           <span className="badge">locked</span>
                         ) : null}
                       </td>

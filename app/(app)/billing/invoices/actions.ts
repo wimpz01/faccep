@@ -30,6 +30,8 @@ type NewLine = {
   amount: number;
   is_vatable: boolean;
   sort_order: number;
+  /** Set on utility and genset lines, tying the charge to the provider bill. */
+  utility_period_id?: string;
 };
 
 /**
@@ -101,7 +103,23 @@ export async function generateInvoices(
     ]),
   );
 
+  // A period charged to tenants is spent. Billing it again would charge the
+  // same provider bill twice, so it is withheld from this run and said so.
   const periodIds = (periods ?? []).map((period) => period.id);
+  const spentPeriods = new Set<string>();
+  if (periodIds.length > 0) {
+    const { data: billedLines } = await supabase
+      .from("invoice_lines")
+      .select("utility_period_id, invoices!inner(status)")
+      .in("utility_period_id", periodIds)
+      .neq("invoices.status", "cancelled")
+      .returns<{ utility_period_id: string }[]>();
+
+    for (const row of billedLines ?? []) {
+      if (row.utility_period_id) spentPeriods.add(row.utility_period_id);
+    }
+  }
+
   const { data: readings } = periodIds.length
     ? await supabase
         .from("meter_readings")
@@ -286,6 +304,12 @@ export async function generateInvoices(
         );
         continue;
       }
+      if (spentPeriods.has(period.id)) {
+        problems.push(
+          `${contract.tenants?.company_name}: the ${utility} period for their location has already been billed and is locked, so no ${utility} was charged.`,
+        );
+        continue;
+      }
       if (missingReading) {
         problems.push(
           `${contract.tenants?.company_name}: missing ${utility} reading for one or more units.`,
@@ -313,6 +337,7 @@ export async function generateInvoices(
         amount: charge.amount,
         is_vatable: isVatable,
         sort_order: order++,
+        utility_period_id: period.id,
       });
 
       // Genset expense split pro-rata by the tenant's kWh share (spec 6).
@@ -328,6 +353,7 @@ export async function generateInvoices(
             amount: share,
             is_vatable: isVatable,
             sort_order: order++,
+            utility_period_id: period.id,
           });
         }
       }

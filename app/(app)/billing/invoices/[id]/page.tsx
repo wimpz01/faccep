@@ -54,6 +54,13 @@ type InvoiceDetail = {
     amount: string;
     is_vatable: boolean;
     sort_order: number;
+    utility_periods: {
+      id: string;
+      utility: string;
+      period_start: string;
+      period_end: string;
+      locations: { code: string } | null;
+    } | null;
   }[];
   credit_memos: {
     id: string;
@@ -82,7 +89,8 @@ export default async function InvoiceDetailPage({
     .from("invoices")
     .select(
       `*, tenants(id, company_name), contracts(id, contract_no),
-       invoice_lines(id, line_kind, description, quantity, unit_price, amount, is_vatable, sort_order),
+       invoice_lines(id, line_kind, description, quantity, unit_price, amount, is_vatable, sort_order,
+         utility_periods(id, utility, period_start, period_end, locations(code))),
        credit_memos(id, memo_no, memo_date, amount, reason)`,
     )
     .eq("id", id)
@@ -240,6 +248,16 @@ export default async function InvoiceDetailPage({
                     <td>
                       <span className="badge mr-2">{line.line_kind}</span>
                       {line.description}
+                      {line.utility_periods ? (
+                        <p className="text-xs muted mt-0.5">
+                          <Link href={`/billing/periods/${line.utility_periods.id}`}>
+                            {line.utility_periods.locations?.code ?? "Location"}{" "}
+                            {line.utility_periods.utility} period{" "}
+                            {formatDate(line.utility_periods.period_start)} to{" "}
+                            {formatDate(line.utility_periods.period_end)}
+                          </Link>
+                        </p>
+                      ) : null}
                     </td>
                     <td className="text-right tabular-nums">
                       {Number(line.quantity)}
