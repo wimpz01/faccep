@@ -9,13 +9,13 @@ import {
   StatTile,
 } from "@/components/ui";
 import { requirePermission } from "@/lib/auth";
-import { formatDate, money } from "@/lib/format";
+import { money } from "@/lib/format";
 import { MODULE, can } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
 
-import { generateInvoices } from "./actions";
+import { generateInvoices, releaseInvoices } from "./actions";
 import { STATUS_BADGE } from "./constants";
-import { GenerateForm } from "./invoice-forms";
+import { GenerateForm, InvoiceTable } from "./invoice-forms";
 
 export const metadata: Metadata = { title: "Invoices" };
 
@@ -40,6 +40,8 @@ export default async function InvoicesPage({
   const context = await requirePermission(MODULE.billingInvoices, "view");
   const companyId = context.activeCompany!.companyId;
   const canEdit = can(context.permissions, MODULE.billingInvoices, "edit");
+  // Releasing posts to the ledger, so it is gated on approve, not edit.
+  const canApprove = can(context.permissions, MODULE.billingInvoices, "approve");
 
   const supabase = await createClient();
   let query = supabase
@@ -76,7 +78,8 @@ export default async function InvoicesPage({
 
   // Overdue is not a status, so it narrows the list here rather than in the
   // query the status buttons drive.
-  const shown = view === "overdue" ? overdue : rows;
+  const byView = view === "overdue" ? overdue : rows;
+
 
   return (
     <>
@@ -116,7 +119,7 @@ export default async function InvoicesPage({
       {view === "overdue" ? (
         <FilterNote
           label="invoices past their due date"
-          count={shown.length}
+          count={byView.length}
           clearHref="/billing/invoices"
         />
       ) : null}
@@ -156,64 +159,28 @@ export default async function InvoicesPage({
         }
         bodyClassName=""
       >
-        {shown.length > 0 ? (
-          <div className="table-scroll">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Invoice</th>
-                  <th>Tenant</th>
-                  <th>Date</th>
-                  <th>Due</th>
-                  <th className="text-right">Total</th>
-                  <th className="text-right">Balance</th>
-                  <th>Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {shown.map((invoice) => {
-                  const balance =
-                    Number(invoice.total) -
-                    Number(invoice.amount_paid) -
-                    Number(invoice.credited_amount);
-                  const isOverdue =
-                    (invoice.status === "released" ||
-                      invoice.status === "partially_paid") &&
-                    invoice.due_date < today;
-                  return (
-                    <tr key={invoice.id}>
-                      <td>
-                        <Link
-                          href={`/billing/invoices/${invoice.id}`}
-                          className="font-semibold"
-                          style={{ color: "var(--color-brand-600)" }}
-                        >
-                          {invoice.invoice_no}
-                        </Link>
-                      </td>
-                      <td className="text-sm">{invoice.tenants?.company_name ?? "—"}</td>
-                      <td className="text-xs">{formatDate(invoice.invoice_date)}</td>
-                      <td className="text-xs">
-                        {formatDate(invoice.due_date)}
-                        {isOverdue ? (
-                          <p style={{ color: "var(--danger)" }}>overdue</p>
-                        ) : null}
-                      </td>
-                      <td className="text-right tabular-nums">{money(invoice.total)}</td>
-                      <td className="text-right tabular-nums">
-                        {invoice.status === "cancelled" ? "—" : money(balance)}
-                      </td>
-                      <td>
-                        <span className={STATUS_BADGE[invoice.status] ?? "badge"}>
-                          {invoice.status.replace("_", " ")}
-                        </span>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+        {byView.length > 0 ? (
+          <InvoiceTable
+            rows={byView.map((invoice) => ({
+              id: invoice.id,
+              invoice_no: invoice.invoice_no,
+              tenant: invoice.tenants?.company_name ?? "—",
+              invoice_date: invoice.invoice_date,
+              due_date: invoice.due_date,
+              total: Number(invoice.total),
+              balance:
+                Number(invoice.total) -
+                Number(invoice.amount_paid) -
+                Number(invoice.credited_amount),
+              status: invoice.status,
+              isOverdue:
+                (invoice.status === "released" ||
+                  invoice.status === "partially_paid") &&
+                invoice.due_date < today,
+            }))}
+            action={releaseInvoices}
+            canRelease={canApprove}
+          />
         ) : (
           <EmptyState>No invoices match this filter.</EmptyState>
         )}

@@ -580,6 +580,105 @@ export async function releaseInvoice(
   return { success: "Released. The invoice can no longer be edited." };
 }
 
+/**
+ * Releases several drafts in one go.
+ *
+ * Releasing posts to the ledger and locks the invoice, so each one is checked
+ * on its own terms rather than trusted from the form: anything already
+ * released, cancelled or totalling zero is skipped and reported, and the rest
+ * still go out. A month's billing is usually released together, and doing it
+ * one row at a time invites half a run.
+ */
+export async function releaseInvoices(
+  _prevState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  try {
+    await assertPermission(MODULE.billingInvoices, "approve");
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+
+  const ids = formData
+    .getAll("ids")
+    .map((value) => String(value))
+    .filter(Boolean);
+
+  if (ids.length === 0) return { error: "Tick the invoices to release." };
+
+  const supabase = await createClient();
+  const { data: invoices } = await supabase
+    .from("invoices")
+    .select("id, invoice_no, status, total")
+    .in("id", ids)
+    .returns<
+      { id: string; invoice_no: string; status: string; total: string }[]
+    >();
+
+  const releasable = (invoices ?? []).filter(
+    (invoice) => invoice.status === "draft" && Number(invoice.total) > 0,
+  );
+  const skipped = (invoices ?? []).filter(
+    (invoice) => !releasable.some((row) => row.id === invoice.id),
+  );
+
+  if (releasable.length === 0) {
+    return {
+      error:
+        "None of those can be released. Only a draft with a value above zero can go out.",
+    };
+  }
+
+  const releasedAt = new Date().toISOString();
+  const done: string[] = [];
+  const failed: string[] = [];
+
+  // One at a time: each release fires the posting trigger, and a failure on
+  // one invoice must not silently take the others down with it.
+  for (const invoice of releasable) {
+    const { error } = await supabase
+      .from("invoices")
+      .update({ status: "released", released_at: releasedAt })
+      .eq("id", invoice.id)
+      .eq("status", "draft");
+
+    if (error) {
+      failed.push(`${invoice.invoice_no} (${error.message})`);
+      continue;
+    }
+    done.push(invoice.invoice_no);
+
+    await logAudit({
+      action: "approve",
+      moduleKey: MODULE.billingInvoices,
+      entityTable: "invoices",
+      entityId: invoice.id,
+      summary: `Released invoice ${invoice.invoice_no} in a batch of ${releasable.length}. It is now locked.`,
+      before: { status: "draft" },
+      after: { status: "released" },
+    });
+  }
+
+  revalidatePath("/billing/invoices");
+
+  const notes: string[] = [];
+  if (done.length > 0) {
+    notes.push(`Released ${done.length} invoice(s): ${done.join(", ")}.`);
+  }
+  if (skipped.length > 0) {
+    notes.push(
+      `Skipped ${skipped.length}: ${skipped
+        .map((row) => `${row.invoice_no} is ${row.status}`)
+        .join(", ")}.`,
+    );
+  }
+  if (failed.length > 0) {
+    return { error: [`Could not release ${failed.join("; ")}.`, ...notes].join(" ") };
+  }
+
+  return { success: notes.join(" ") };
+}
+
 /** Cancellation is approval-gated (spec 2). */
 export async function requestInvoiceCancellation(
   _prevState: ActionState,

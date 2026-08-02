@@ -1,14 +1,14 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 
-import { Card, EmptyState, PageHeader } from "@/components/ui";
+import { Card, PageHeader } from "@/components/ui";
 import { requirePermission } from "@/lib/auth";
-import { formatDate, money } from "@/lib/format";
 import { MODULE, can } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
 
 import { createTenant } from "./actions";
 import { TenantForm } from "./tenant-form";
+import { TenantList } from "./tenant-list";
 
 export const metadata: Metadata = { title: "Tenants" };
 
@@ -27,14 +27,12 @@ type TenantRow = {
   }[];
 };
 
-const STATUS_BADGE: Record<string, string> = {
-  active: "badge badge-brand",
-  prospect: "badge",
-  ended: "badge",
-  blacklisted: "badge",
-};
-
-export default async function TenantsPage() {
+export default async function TenantsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ add?: string }>;
+}) {
+  const { add } = await searchParams;
   const context = await requirePermission(MODULE.tenants, "view");
   const companyId = context.activeCompany!.companyId;
   const canEdit = can(context.permissions, MODULE.tenants, "edit");
@@ -49,14 +47,30 @@ export default async function TenantsPage() {
     .order("company_name")
     .returns<TenantRow[]>();
 
+  const all = tenants ?? [];
+  const adding = canEdit && add === "1";
+
   return (
     <>
       <PageHeader
         title="Tenants"
         description="Tenant companies, their VAT status and their live contracts."
+        action={
+          canEdit ? (
+            adding ? (
+              <Link href="/tenants" className="btn btn-secondary btn-sm">
+                Close
+              </Link>
+            ) : (
+              <Link href="/tenants?add=1" className="btn btn-primary btn-sm">
+                + New tenant
+              </Link>
+            )
+          ) : null
+        }
       />
 
-      {canEdit ? (
+      {adding ? (
         <div className="mb-6">
           <Card
             title="Add a tenant"
@@ -67,76 +81,23 @@ export default async function TenantsPage() {
         </div>
       ) : null}
 
-      <Card
-        title={`${tenants?.length ?? 0} tenant${tenants?.length === 1 ? "" : "s"}`}
-        bodyClassName=""
-      >
-        {tenants && tenants.length > 0 ? (
-          <div className="table-scroll">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Tenant</th>
-                  <th>Contact</th>
-                  <th>VAT</th>
-                  <th>Status</th>
-                  <th className="text-right">Monthly rent</th>
-                  <th>Contract ends</th>
-                </tr>
-              </thead>
-              <tbody>
-                {tenants.map((tenant) => {
-                  const active = (tenant.contracts ?? []).find(
-                    (contract) => contract.status === "active",
-                  );
-                  return (
-                    <tr key={tenant.id}>
-                      <td>
-                        <Link
-                          href={`/tenants/${tenant.id}`}
-                          className="font-semibold"
-                          style={{ color: "var(--color-brand-600)" }}
-                        >
-                          {tenant.company_name}
-                        </Link>
-                      </td>
-                      <td className="text-xs">
-                        {tenant.contact_person ?? "—"}
-                        {tenant.mobile_number ? (
-                          <p className="muted">{tenant.mobile_number}</p>
-                        ) : null}
-                      </td>
-                      <td>
-                        {tenant.is_vatable ? (
-                          <span className="badge badge-brand">VATable</span>
-                        ) : (
-                          <span className="badge">Non-VAT</span>
-                        )}
-                      </td>
-                      <td>
-                        <span className={STATUS_BADGE[tenant.status] ?? "badge"}>
-                          {tenant.status}
-                        </span>
-                      </td>
-                      <td className="text-right tabular-nums">
-                        {active ? money(active.monthly_rent) : "—"}
-                      </td>
-                      <td className="text-xs">
-                        {active ? formatDate(active.end_date) : "—"}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <EmptyState>
-            No tenants yet
-            {canEdit ? " — add the first one above." : "."}
-          </EmptyState>
-        )}
-      </Card>
+      <TenantList
+        rows={all.map((tenant) => {
+          const active = (tenant.contracts ?? []).find(
+            (contract) => contract.status === "active",
+          );
+          return {
+            id: tenant.id,
+            company_name: tenant.company_name,
+            contact_person: tenant.contact_person,
+            mobile_number: tenant.mobile_number,
+            is_vatable: tenant.is_vatable,
+            status: tenant.status,
+            monthly_rent: active ? Number(active.monthly_rent) : null,
+            contract_ends: active ? active.end_date : null,
+          };
+        })}
+      />
     </>
   );
 }

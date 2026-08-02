@@ -1,7 +1,7 @@
 import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
-import { isAuthUnreachable } from "@/lib/auth";
+import { isAuthUnreachable } from "@/lib/auth-errors";
 
 type CookieToSet = { name: string; value: string; options: CookieOptions };
 

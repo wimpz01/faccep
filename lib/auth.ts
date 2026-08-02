@@ -4,6 +4,7 @@ import { cache } from "react";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
+import { isAuthUnreachable } from "@/lib/auth-errors";
 import { createClient } from "@/lib/supabase/server";
 import {
   NO_PERMISSIONS,
@@ -52,15 +53,6 @@ type PermissionRow = {
 };
 
 /**
- * A network failure reaching the auth service, as opposed to a straight answer
- * that there is no session. Supabase names these retryable itself.
- */
-export function isAuthUnreachable(error: { name?: string; status?: number } | null) {
-  if (!error) return false;
-  return error.name === "AuthRetryableFetchError" || error.status === 0;
-}
-
-/**
  * Asks who is signed in, retrying a dropped connection before giving up.
  *
  * Supabase auth is a separate hop from the database, and it fails on its own
@@ -79,7 +71,9 @@ async function getUserWithRetry(
     const { data, error } = await supabase.auth.getUser();
     if (data.user) return { user: data.user, unreachable: false };
     if (!isAuthUnreachable(error)) return { user: null, unreachable: false };
-    await new Promise((resolve) => setTimeout(resolve, 150 * (attempt + 1)));
+    // Backs off a little further each time; the usual cause is a connection
+    // that timed out rather than a service that is down.
+    await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
   }
 
   return { user: null, unreachable: true };
