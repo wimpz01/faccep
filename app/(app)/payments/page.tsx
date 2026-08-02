@@ -1,14 +1,15 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 
-import { Card, EmptyState, PageHeader, StatTile } from "@/components/ui";
+import { Card, PageHeader, StatTile } from "@/components/ui";
 import { requirePermission } from "@/lib/auth";
-import { formatDate, money } from "@/lib/format";
+import { money } from "@/lib/format";
 import { MODULE, can } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
 
 import { recordPayment } from "./actions";
 import { RecordPaymentForm, type OpenInvoice } from "./payment-forms";
+import { PaymentList } from "./payment-list";
 
 export const metadata: Metadata = { title: "Payments" };
 
@@ -25,7 +26,12 @@ type PaymentRow = {
   payment_applications: { amount: string }[];
 };
 
-export default async function PaymentsPage() {
+export default async function PaymentsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ add?: string }>;
+}) {
+  const { add } = await searchParams;
   const context = await requirePermission(MODULE.payments, "view");
   const companyId = context.activeCompany!.companyId;
   const canEdit = can(context.permissions, MODULE.payments, "edit");
@@ -69,6 +75,7 @@ export default async function PaymentsPage() {
     .filter((invoice) => invoice.balance > 0);
 
   const rows = payments ?? [];
+  const adding = canEdit && add === "1";
   const posted = rows.filter((row) => row.status === "posted");
   const thisMonth = new Date().toISOString().slice(0, 7);
   const collectedThisMonth = posted
@@ -81,9 +88,22 @@ export default async function PaymentsPage() {
         title="Payments"
         description="Payments, prepayments and refunds. Once posted, a payment can only be reversed by an approved void."
         action={
-          <Link href="/payments/pdc" className="btn btn-secondary btn-sm">
-            Postdated cheques
-          </Link>
+          <div className="flex gap-2 flex-wrap">
+            <Link href="/payments/pdc" className="btn btn-secondary btn-sm">
+              Postdated cheques
+            </Link>
+            {canEdit ? (
+              adding ? (
+                <Link href="/payments" className="btn btn-secondary btn-sm">
+                  Close
+                </Link>
+              ) : (
+                <Link href="/payments?add=1" className="btn btn-primary btn-sm">
+                  + Record payment
+                </Link>
+              )
+            ) : null}
+          </div>
         }
       />
 
@@ -107,7 +127,7 @@ export default async function PaymentsPage() {
         />
       </div>
 
-      {canEdit ? (
+      {adding ? (
         <div className="mb-6">
           <Card
             title="Record a payment"
@@ -122,70 +142,23 @@ export default async function PaymentsPage() {
         </div>
       ) : null}
 
-      <Card title="Recent payments" bodyClassName="">
-        {rows.length > 0 ? (
-          <div className="table-scroll">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Reference</th>
-                  <th>Tenant</th>
-                  <th>Date</th>
-                  <th>Type</th>
-                  <th>Mode</th>
-                  <th className="text-right">Amount</th>
-                  <th className="text-right">Applied</th>
-                  <th>Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((payment) => {
-                  const applied = (payment.payment_applications ?? []).reduce(
-                    (sum, row) => sum + Number(row.amount),
-                    0,
-                  );
-                  return (
-                    <tr key={payment.id}>
-                      <td>
-                        <Link
-                          href={`/payments/${payment.id}`}
-                          className="font-semibold"
-                          style={{ color: "var(--color-brand-600)" }}
-                        >
-                          {payment.payment_no}
-                        </Link>
-                        {payment.reference ? (
-                          <p className="text-xs muted">{payment.reference}</p>
-                        ) : null}
-                      </td>
-                      <td className="text-sm">{payment.tenants?.company_name ?? "—"}</td>
-                      <td className="text-xs">{formatDate(payment.payment_date)}</td>
-                      <td className="text-xs">{payment.payment_kind}</td>
-                      <td className="text-xs">{payment.payment_mode}</td>
-                      <td className="text-right tabular-nums">{money(payment.amount)}</td>
-                      <td className="text-right tabular-nums">{money(applied)}</td>
-                      <td>
-                        <span
-                          className="badge"
-                          style={
-                            payment.status === "voided"
-                              ? { color: "var(--danger)" }
-                              : undefined
-                          }
-                        >
-                          {payment.status}
-                        </span>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <EmptyState>No payments recorded yet.</EmptyState>
-        )}
-      </Card>
+      <PaymentList
+        rows={rows.map((payment) => ({
+          id: payment.id,
+          payment_no: payment.payment_no,
+          reference: payment.reference,
+          tenant: payment.tenants?.company_name ?? "—",
+          payment_date: payment.payment_date,
+          payment_kind: payment.payment_kind,
+          payment_mode: payment.payment_mode,
+          amount: Number(payment.amount),
+          applied: (payment.payment_applications ?? []).reduce(
+            (sum, row) => sum + Number(row.amount),
+            0,
+          ),
+          status: payment.status,
+        }))}
+      />
     </>
   );
 }
