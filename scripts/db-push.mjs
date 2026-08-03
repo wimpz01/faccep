@@ -40,11 +40,29 @@ async function run() {
   const db = await openConnection();
   console.log(`Using the ${db.label}.\n`);
 
+  /**
+   * The ledger is created here rather than by a migration, so it never passed
+   * through the discipline every other table gets. Supabase grants anon and
+   * authenticated full access to any new table in the public schema, and
+   * PostgREST publishes it -- which left strangers able to write to it, and a
+   * poisoned ledger makes db-push skip migrations it thinks are applied.
+   * Locking it down here means a fresh environment is safe from the first run,
+   * not from whenever 0054 happens to apply. Every statement is idempotent.
+   */
   await db.query(`
     create table if not exists public._migrations (
       name        text primary key,
       applied_at  timestamptz not null default now()
     );
+
+    alter table public._migrations enable row level security;
+
+    revoke all on public._migrations from anon, authenticated;
+    grant select on public._migrations to authenticated;
+
+    drop policy if exists migrations_read on public._migrations;
+    create policy migrations_read on public._migrations
+      for select to authenticated using (true);
   `);
 
   const applied = await db.query("select name from public._migrations");
