@@ -7,12 +7,6 @@ import { FormError } from "@/components/ui";
 
 import type { ActionState } from "./actions";
 
-export type ItemOption = {
-  id: string;
-  name: string;
-  unit_of_measure: string;
-  quantity_on_hand: string;
-};
 export type CategoryOption = { id: string; name: string };
 export type ToolOption = { id: string; name: string };
 
@@ -151,14 +145,28 @@ export function ItemForm({
 }) {
   const [state, formAction] = useActionState<ActionState, FormData>(action, {});
   return (
-    <form action={formAction} className="grid gap-4 sm:grid-cols-3">
-      <div>
+    /* What identifies the item goes on top in full-width fields, since a SKU
+       and a name are long; the numbers that describe it pair up underneath. */
+    <form action={formAction} className="grid gap-4 sm:grid-cols-6">
+      <div className="sm:col-span-6">
+        <label className="label" htmlFor="item-sku">
+          SKU #
+        </label>
+        <input
+          id="item-sku"
+          className="input"
+          placeholder="Issued on save"
+          disabled
+        />
+      </div>
+      <div className="sm:col-span-6">
         <label className="label" htmlFor="item-name">
           Item name *
         </label>
         <input id="item-name" name="name" className="input" required />
       </div>
-      <div>
+
+      <div className="sm:col-span-3">
         <label className="label" htmlFor="item-category">
           Category
         </label>
@@ -171,11 +179,7 @@ export function ItemForm({
           ))}
         </select>
       </div>
-      <div>
-        <p className="label">SKU</p>
-        <p className="text-sm muted pt-2">Issued on save.</p>
-      </div>
-      <div>
+      <div className="sm:col-span-3">
         <label className="label" htmlFor="item-uom">
           Unit of measure *
         </label>
@@ -187,7 +191,8 @@ export function ItemForm({
           required
         />
       </div>
-      <div>
+
+      <div className="sm:col-span-3">
         <label className="label" htmlFor="item-reorder">
           Reorder level
         </label>
@@ -201,7 +206,7 @@ export function ItemForm({
           defaultValue="0"
         />
       </div>
-      <div>
+      <div className="sm:col-span-3">
         <label className="label" htmlFor="item-cost">
           Unit cost (₱)
         </label>
@@ -215,7 +220,8 @@ export function ItemForm({
           defaultValue="0"
         />
       </div>
-      <div className="sm:col-span-3 flex items-center gap-3 flex-wrap">
+
+      <div className="sm:col-span-6 flex items-center gap-3 flex-wrap">
         <Submit label="Add item" />
         <Result state={state} />
       </div>
@@ -223,111 +229,6 @@ export function ItemForm({
   );
 }
 
-export function MovementForm({
-  action,
-  items,
-}: {
-  action: (state: ActionState, formData: FormData) => Promise<ActionState>;
-  items: ItemOption[];
-}) {
-  const [state, formAction] = useActionState<ActionState, FormData>(action, {});
-  const [kind, setKind] = useState("receipt");
-  const [itemId, setItemId] = useState("");
-
-  const item = items.find((candidate) => candidate.id === itemId);
-
-  return (
-    <form action={formAction} className="grid gap-4 sm:grid-cols-4">
-      <div>
-        <label className="label" htmlFor="movement-item">
-          Item *
-        </label>
-        <select
-          id="movement-item"
-          name="item_id"
-          className="select"
-          required
-          value={itemId}
-          onChange={(event) => setItemId(event.currentTarget.value)}
-        >
-          <option value="">Choose…</option>
-          {items.map((option) => (
-            <option key={option.id} value={option.id}>
-              {option.name} ({Number(option.quantity_on_hand)} {option.unit_of_measure})
-            </option>
-          ))}
-        </select>
-      </div>
-
-      <div>
-        <label className="label" htmlFor="movement-kind">
-          Movement *
-        </label>
-        <select
-          id="movement-kind"
-          name="movement_kind"
-          className="select"
-          value={kind}
-          onChange={(event) => setKind(event.currentTarget.value)}
-        >
-          <option value="receipt">Receipt — into stock</option>
-          <option value="issue">Issue — out to a job</option>
-          <option value="return">Return — unused, back to stock</option>
-          <option value="adjustment">Adjustment — stock count</option>
-        </select>
-      </div>
-
-      <div>
-        <label className="label" htmlFor="movement-qty">
-          Quantity *
-        </label>
-        <input
-          id="movement-qty"
-          name="quantity"
-          type="number"
-          step="0.001"
-          min="0.001"
-          className="input"
-          required
-        />
-        {item ? (
-          <p className="text-xs muted mt-1">
-            {Number(item.quantity_on_hand)} {item.unit_of_measure} on hand
-          </p>
-        ) : null}
-      </div>
-
-      {kind === "adjustment" ? (
-        <div>
-          <label className="label" htmlFor="adjust-direction">
-            Direction
-          </label>
-          <select
-            id="adjust-direction"
-            name="adjust_direction"
-            className="select"
-            defaultValue="up"
-          >
-            <option value="up">Increase</option>
-            <option value="down">Decrease</option>
-          </select>
-        </div>
-      ) : (
-        <div>
-          <label className="label" htmlFor="movement-note">
-            Note
-          </label>
-          <input id="movement-note" name="note" className="input" />
-        </div>
-      )}
-
-      <div className="sm:col-span-4 flex items-center gap-3 flex-wrap">
-        <Submit label="Record movement" />
-        <Result state={state} />
-      </div>
-    </form>
-  );
-}
 
 export function ToolForm({
   action,

@@ -67,14 +67,35 @@ export default async function AppLayout({
   if (can(permissions, MODULE.maintenanceScheduled, "view")) {
     operations.push({ href: "/maintenance/schedules", label: "Scheduled maintenance" });
   }
-  if (can(permissions, MODULE.inventoryItems, "view")) {
-    operations.push({ href: "/inventory", label: "Inventory" });
-  }
-  if (can(permissions, MODULE.inventoryTools, "view")) {
-    operations.push({ href: "/inventory/tools", label: "Tools & equipment" });
-  }
   if (operations.length > 0) {
     groups.push({ group: "Operations", items: operations });
+  }
+
+  /**
+   * Inventory stands on its own rather than sitting inside Operations. It is
+   * several jobs, not one screen -- keeping stock, adjusting it, and answering
+   * where it went -- and each wants its own way in.
+   */
+  const inventory: NavItem[] = [];
+  if (can(permissions, MODULE.inventoryItems, "view")) {
+    inventory.push({ href: "/inventory", label: "Item list" });
+  }
+  if (can(permissions, MODULE.inventoryItems, "edit")) {
+    inventory.push({ href: "/inventory/new", label: "Add new item" });
+    inventory.push({ href: "/inventory/import", label: "Import a list" });
+  }
+  if (can(permissions, MODULE.inventoryMovements, "view")) {
+    inventory.push({ href: "/inventory/adjustments", label: "Stock adjustment" });
+    inventory.push({ href: "/inventory/history", label: "Movement history" });
+  }
+  if (can(permissions, MODULE.inventoryItems, "view")) {
+    inventory.push({ href: "/inventory/categories", label: "Categories" });
+  }
+  if (can(permissions, MODULE.inventoryTools, "view")) {
+    inventory.push({ href: "/inventory/tools", label: "Tools & equipment" });
+  }
+  if (inventory.length > 0) {
+    groups.push({ group: "Inventory", items: inventory });
   }
 
   const purchasing: NavItem[] = [];

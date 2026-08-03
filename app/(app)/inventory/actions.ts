@@ -330,78 +330,6 @@ export async function importItems(
  * Records a stock movement. The sign is applied here from the movement kind so
  * the ledger always sums to the balance -- callers never pass a negative.
  */
-export async function recordMovement(
-  _prevState: ActionState,
-  formData: FormData,
-): Promise<ActionState> {
-  let companyId: string;
-  let userId: string;
-  try {
-    const context = await assertPermission(MODULE.inventoryMovements, "edit");
-    companyId = context.activeCompany!.companyId;
-    userId = context.userId;
-  } catch (error) {
-    return { error: (error as Error).message };
-  }
-
-  const itemId = String(formData.get("item_id") ?? "");
-  const kind = String(formData.get("movement_kind") ?? "");
-  const magnitude = Number(formData.get("quantity") ?? 0);
-  const note = String(formData.get("note") ?? "").trim();
-
-  if (!itemId) return { error: "Choose an item." };
-  if (!Number.isFinite(magnitude) || magnitude <= 0) {
-    return { error: "Enter a quantity greater than zero." };
-  }
-  if (!["receipt", "issue", "return", "adjustment"].includes(kind)) {
-    return { error: "Unknown movement type." };
-  }
-
-  const supabase = await createClient();
-  const { data: item } = await supabase
-    .from("inventory_items")
-    .select("name, quantity_on_hand, unit_cost")
-    .eq("id", itemId)
-    .single();
-
-  if (!item) return { error: "Item not found." };
-
-  const direction = kind === "issue" ? -1 : 1;
-  const signed =
-    kind === "adjustment"
-      ? Number(formData.get("adjust_direction") === "down" ? -magnitude : magnitude)
-      : direction * magnitude;
-
-  if (signed < 0 && Number(item.quantity_on_hand) + signed < 0) {
-    return {
-      error: `Only ${Number(item.quantity_on_hand)} on hand — cannot take out ${magnitude}.`,
-    };
-  }
-
-  const { error } = await supabase.from("inventory_movements").insert({
-    company_id: companyId,
-    item_id: itemId,
-    movement_kind: kind,
-    quantity: signed,
-    unit_cost: item.unit_cost,
-    note: note || null,
-    created_by: userId,
-  });
-
-  if (error) return { error: error.message };
-
-  await logAudit({
-    action: "update",
-    moduleKey: MODULE.inventoryMovements,
-    entityTable: "inventory_movements",
-    entityId: itemId,
-    summary: `${kind} of ${magnitude} ${item.name}${note ? ` — ${note}` : ""}.`,
-    after: { kind, quantity: signed },
-  });
-
-  revalidatePath("/inventory");
-  return { success: `Recorded ${kind} of ${magnitude} ${item.name}.` };
-}
 
 // ---------------------------------------------------------------------------
 // Tools
@@ -511,4 +439,124 @@ export async function returnTool(formData: FormData) {
   });
 
   revalidatePath("/inventory/tools");
+}
+
+// ---------------------------------------------------------------------------
+// Stock adjustment: a numbered document carrying as many lines as the count
+// needed. The database issues the number and posts each line to the ledger.
+// ---------------------------------------------------------------------------
+
+export async function createAdjustment(
+  _prevState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  let companyId: string;
+  let userId: string;
+  try {
+    const context = await assertPermission(MODULE.inventoryMovements, "edit");
+    companyId = context.activeCompany!.companyId;
+    userId = context.userId;
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+
+  const reason = String(formData.get("reason") ?? "").trim();
+  const adjustmentDate = String(formData.get("adjustment_date") ?? "").trim();
+
+  const itemIds = formData.getAll("line_item_id").map(String);
+  const kinds = formData.getAll("line_kind").map(String);
+  const quantities = formData.getAll("line_quantity").map(String);
+  const directions = formData.getAll("line_direction").map(String);
+  const costs = formData.getAll("line_unit_cost").map(String);
+  const notes = formData.getAll("line_note").map(String);
+
+  type Line = {
+    item_id: string;
+    movement_kind: string;
+    quantity: number;
+    unit_cost: number | null;
+    note: string | null;
+  };
+
+  const lines: Line[] = [];
+  for (let i = 0; i < itemIds.length; i += 1) {
+    const itemId = itemIds[i];
+    // A blank row is somebody who added a line and changed their mind.
+    if (!itemId) continue;
+
+    const kind = kinds[i] ?? "";
+    const magnitude = Number(quantities[i] ?? 0);
+
+    if (!["receipt", "issue", "return", "adjustment"].includes(kind)) {
+      return { error: `Line ${i + 1}: unknown movement type.` };
+    }
+    if (!Number.isFinite(magnitude) || magnitude <= 0) {
+      return { error: `Line ${i + 1}: enter a quantity greater than zero.` };
+    }
+
+    // Left blank, the item's own cost is used when the line posts.
+    const rawCost = (costs[i] ?? "").trim();
+    const unitCost = rawCost === "" ? null : Number(rawCost);
+    if (unitCost !== null && (!Number.isFinite(unitCost) || unitCost < 0)) {
+      return { error: `Line ${i + 1}: unit cost cannot be negative.` };
+    }
+
+    // The ledger stores a signed quantity; the form asks for a direction.
+    const goesOut =
+      kind === "issue" || (kind === "adjustment" && directions[i] === "down");
+
+    lines.push({
+      item_id: itemId,
+      movement_kind: kind,
+      quantity: goesOut ? -magnitude : magnitude,
+      unit_cost: unitCost,
+      note: notes[i]?.trim() || null,
+    });
+  }
+
+  if (lines.length === 0) return { error: "Add at least one item line." };
+  if (!reason) return { error: "Give a reason for the adjustment." };
+
+  const supabase = await createClient();
+
+  const { data: head, error: headError } = await supabase
+    .from("inventory_adjustments")
+    .insert({
+      company_id: companyId,
+      reason,
+      adjustment_date: adjustmentDate || undefined,
+      created_by: userId,
+    })
+    .select("id, adjustment_no")
+    .single();
+
+  if (headError || !head) {
+    return { error: headError?.message ?? "Could not open the adjustment." };
+  }
+
+  const { error: lineError } = await supabase
+    .from("inventory_adjustment_lines")
+    .insert(lines.map((line) => ({ ...line, adjustment_id: head.id })));
+
+  if (lineError) {
+    // The header is worthless without its lines, so it does not stay behind.
+    await supabase.from("inventory_adjustments").delete().eq("id", head.id);
+    return { error: lineError.message };
+  }
+
+  await logAudit({
+    action: "create",
+    moduleKey: MODULE.inventoryMovements,
+    entityTable: "inventory_adjustments",
+    entityId: head.id,
+    summary: `${head.adjustment_no}: ${lines.length} line(s) — ${reason}`,
+    after: { lines: lines.length, reason },
+  });
+
+  revalidatePath("/inventory");
+  revalidatePath("/inventory/adjustments");
+  revalidatePath("/inventory/history");
+  return {
+    success: `${head.adjustment_no} posted — ${lines.length} line(s) applied to stock.`,
+  };
 }
