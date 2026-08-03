@@ -6,6 +6,8 @@ import { requirePermission } from "@/lib/auth";
 import { MODULE, can } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
 
+import { isPlaceholderEmail } from "./constants";
+
 import { createUser, removeCompanyUser } from "./actions";
 import { NewUserForm } from "./user-forms";
 
@@ -65,7 +67,7 @@ export default async function UsersPage() {
         <div className="mb-6">
           <Card
             title="Add a user"
-            description="If the email already has an account in another company, it is reused."
+            description="Email is optional. If one is given and already has an account in another company, that account is reused."
           >
             <NewUserForm action={createUser} roles={roles ?? []} />
           </Card>
@@ -102,8 +104,12 @@ export default async function UsersPage() {
                       <span className="text-sm">
                         {member.profiles?.full_name || "Unnamed user"}
                       </span>
+                      {/* A derived address is ours, not theirs; showing it
+                          would look like an address they can be reached at. */}
                       <p className="text-xs muted break-all">
-                        {member.profiles?.email}
+                        {isPlaceholderEmail(member.profiles?.email)
+                          ? "No email"
+                          : member.profiles?.email}
                       </p>
                     </td>
                     <td>

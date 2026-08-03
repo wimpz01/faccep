@@ -159,15 +159,31 @@ export async function saveRolePermissions(
     [...formData.keys()].filter((key) => key.includes("|")),
   );
 
-  const rows = modules.map((mod) => ({
-    role_id: roleId,
-    module_key: mod.key,
-    can_view: granted.has(`${mod.key}|view`),
-    can_edit: granted.has(`${mod.key}|edit`),
-    can_delete: granted.has(`${mod.key}|delete`),
-    can_approve: granted.has(`${mod.key}|approve`),
-    can_void: granted.has(`${mod.key}|void`),
-  }));
+  // Settled to the ladder before saving: delete implies edit implies view, and
+  // nothing at all without view. The database rejects a row that breaks it, so
+  // this keeps a malformed post from surfacing as a constraint error.
+  const rows = modules.map((mod) => {
+    const canDelete = granted.has(`${mod.key}|delete`);
+    const canEdit = granted.has(`${mod.key}|edit`) || canDelete;
+    const canApprove = granted.has(`${mod.key}|approve`);
+    const canVoid = granted.has(`${mod.key}|void`);
+    const canView =
+      granted.has(`${mod.key}|view`) ||
+      canEdit ||
+      canDelete ||
+      canApprove ||
+      canVoid;
+
+    return {
+      role_id: roleId,
+      module_key: mod.key,
+      can_view: canView,
+      can_edit: canView && canEdit,
+      can_delete: canView && canDelete,
+      can_approve: canView && canApprove,
+      can_void: canView && canVoid,
+    };
+  });
 
   const { data: before } = await supabase
     .from("role_permissions")

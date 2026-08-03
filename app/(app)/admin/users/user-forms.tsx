@@ -72,17 +72,17 @@ export function NewUserForm({
 
       <div>
         <label className="label" htmlFor="new-user-email">
-          Email *
+          Email
         </label>
         <input
           id="new-user-email"
           name="email"
           type="email"
           className="input"
-          required
         />
         <p className="text-xs muted mt-1">
-          The account identity behind the code. Never used to sign in.
+          Optional. Never used to sign in — the user code is. Leave it blank
+          for somebody without an address of their own.
         </p>
       </div>
 

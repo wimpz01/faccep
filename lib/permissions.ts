@@ -26,11 +26,11 @@ export const ACTION_LABELS: Record<PermissionAction, string> = {
 };
 
 export const ACTION_HINTS: Record<PermissionAction, string> = {
-  view: "Can see the record and lists, but change nothing.",
-  edit: "Can create and modify records.",
-  delete: "Can remove records.",
-  approve: "Can sign off items that require approval.",
-  void: "Can reverse a posted record. Still requires approval to take effect.",
+  view: "See the module and its records, but change nothing.",
+  edit: "See and save. Cannot delete.",
+  delete: "See, save and delete.",
+  approve: "Sign off items that require approval.",
+  void: "Reverse a posted record. Still requires approval to take effect.",
 };
 
 /** Module keys seeded by supabase/migrations/0003_seed_modules.sql. */
@@ -40,6 +40,7 @@ export const MODULE = {
   dashboardUtilities: "dashboard.utilities",
   dashboardExpenses: "dashboard.expenses",
   dashboardNotifications: "dashboard.notifications",
+  dashboardCheques: "dashboard.cheques",
   tenants: "tenants",
   contracts: "contracts",
   clearance: "clearance",
@@ -106,11 +107,40 @@ export const NO_PERMISSIONS: ModulePermissions = {
   void: false,
 };
 
+/**
+ * What a role may do with a module.
+ *
+ * The first three rights are a ladder, not independent switches:
+ *
+ *   revoked  no access at all — the module is not even visible
+ *   view     read it, change nothing
+ *   edit     read and save, but not delete
+ *   delete   read, save and delete
+ *
+ * so delete implies edit and edit implies view. Approve and void sit apart:
+ * they are sign-off rights that some modules do not offer, and they still
+ * require view, because signing off on something you cannot see is not a
+ * coherent right.
+ *
+ * Resolved here rather than trusted from the database, so a row saved by an
+ * older screen — or edited directly — cannot grant edit on a module the role
+ * is not allowed to open. Page guards ask for view; action guards ask for
+ * edit, and without this the two could disagree.
+ */
 export function permissionsFor(
   matrix: PermissionMatrix,
   moduleKey: string,
 ): ModulePermissions {
-  return matrix[moduleKey] ?? NO_PERMISSIONS;
+  const granted = matrix[moduleKey];
+  if (!granted || !granted.view) return NO_PERMISSIONS;
+
+  return {
+    view: true,
+    edit: granted.edit || granted.delete,
+    delete: granted.delete,
+    approve: granted.approve,
+    void: granted.void,
+  };
 }
 
 export function can(

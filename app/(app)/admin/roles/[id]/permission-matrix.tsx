@@ -49,15 +49,70 @@ export function PermissionMatrix({
   const [matrix, setMatrix] = useState<MatrixState>(initial);
   const groups = groupModules(modules);
 
+  /**
+   * View, edit and delete are a ladder, so ticking a rung brings everything
+   * below it and unticking one drops everything above. Approve and void sit
+   * apart, but still need view.
+   */
   function setOne(
     moduleKey: string,
     permissionAction: PermissionAction,
     value: boolean,
   ) {
-    setMatrix((current) => ({
-      ...current,
-      [moduleKey]: { ...current[moduleKey], [permissionAction]: value },
-    }));
+    setMatrix((current) => {
+      const row = { ...current[moduleKey] };
+      row[permissionAction] = value;
+
+      if (value) {
+        if (permissionAction === "delete") {
+          row.edit = true;
+          row.view = true;
+        }
+        if (permissionAction === "edit") row.view = true;
+        if (permissionAction === "approve" || permissionAction === "void") {
+          row.view = true;
+        }
+      } else {
+        if (permissionAction === "view") {
+          row.edit = false;
+          row.delete = false;
+          row.approve = false;
+          row.void = false;
+        }
+        if (permissionAction === "edit") row.delete = false;
+      }
+
+      return { ...current, [moduleKey]: row };
+    });
+  }
+
+  /** Every right this module offers, in one click. */
+  function grantAll(mod: ModuleRow) {
+    setMatrix((current) => {
+      const row = { ...current[mod.key] };
+      for (const permissionAction of PERMISSION_ACTIONS) {
+        if (!supports(mod, permissionAction)) continue;
+        row[permissionAction] = true;
+      }
+      return { ...current, [mod.key]: row };
+    });
+  }
+
+  /**
+   * Takes every right on one module away at once.
+   *
+   * Clearing view is what actually locks the module: without it the role can
+   * neither open the page nor drive an action against it. The other boxes are
+   * cleared too so nothing is left looking granted.
+   */
+  function revokeModule(moduleKey: string) {
+    setMatrix((current) => {
+      const row = { ...current[moduleKey] };
+      for (const permissionAction of PERMISSION_ACTIONS) {
+        row[permissionAction] = false;
+      }
+      return { ...current, [moduleKey]: row };
+    });
   }
 
   function setMany(mods: ModuleRow[], value: boolean, only?: PermissionAction) {
@@ -142,6 +197,11 @@ export function PermissionMatrix({
                         {ACTION_LABELS[permissionAction]}
                       </th>
                     ))}
+                    {canEdit ? (
+                      <th className="text-center" style={{ width: "11rem" }}>
+                        Access
+                      </th>
+                    ) : null}
                   </tr>
                 </thead>
                 <tbody>
@@ -181,6 +241,37 @@ export function PermissionMatrix({
                           </td>
                         );
                       })}
+                      {canEdit ? (
+                        <td className="text-center">
+                          <div className="inline-flex gap-1.5 flex-wrap justify-center">
+                            <button
+                              type="button"
+                              className="btn btn-secondary btn-sm"
+                              onClick={() => grantAll(mod)}
+                              title="View, edit, delete and any sign-off this module offers"
+                            >
+                              Grant all
+                            </button>
+                            {matrix[mod.key]?.view ? (
+                              <button
+                                type="button"
+                                className="btn btn-danger btn-sm"
+                                onClick={() => revokeModule(mod.key)}
+                                title="No access at all — the module is not even visible"
+                              >
+                                Revoke
+                              </button>
+                            ) : (
+                              <span
+                                className="text-xs self-center"
+                                style={{ color: "var(--danger)" }}
+                              >
+                                revoked
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                      ) : null}
                     </tr>
                   ))}
                 </tbody>

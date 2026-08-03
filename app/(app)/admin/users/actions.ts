@@ -9,10 +9,17 @@ import { MODULE, PERMISSION_ACTIONS, can } from "@/lib/permissions";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 
+import { placeholderEmailFor } from "./constants";
+
 export type ActionState = { error?: string; success?: string };
 
 const newUserSchema = z.object({
-  email: z.string().trim().email("Enter a valid email address."),
+  email: z
+    .string()
+    .trim()
+    .email("Enter a valid email address, or leave it blank.")
+    .or(z.literal(""))
+    .nullish(),
   user_code: z
     .string()
     .trim()
@@ -80,12 +87,21 @@ export async function createUser(
     .ilike("user_code", user_code)
     .maybeSingle();
 
-  // Reuse the account if this person already works for another company.
-  const { data: existing } = await admin
-    .from("profiles")
-    .select("id, full_name")
-    .ilike("email", email)
-    .maybeSingle();
+  // An account with no address of its own gets one derived from its code, so
+  // Supabase Auth has something unique to hold.
+  const givenEmail = (email ?? "").trim();
+  const accountEmail = givenEmail || placeholderEmailFor(user_code);
+
+  // Reuse the account if this person already works for another company. Only
+  // a real address identifies somebody; a derived one is unique by
+  // construction and would never match anyone else anyway.
+  const { data: existing } = givenEmail
+    ? await admin
+        .from("profiles")
+        .select("id, full_name")
+        .ilike("email", givenEmail)
+        .maybeSingle()
+    : { data: null };
 
   if (codeTaken && codeTaken.id !== existing?.id) {
     return { error: `The user code ${user_code} is already taken.` };
@@ -97,7 +113,7 @@ export async function createUser(
   if (!userId) {
     const { data: created, error: createError } =
       await admin.auth.admin.createUser({
-        email,
+        email: accountEmail,
         password,
         email_confirm: true,
         user_metadata: { full_name },
@@ -148,10 +164,10 @@ export async function createUser(
     entityTable: "company_users",
     entityId: membership.id,
     summary: createdAccount
-      ? `Created user ${user_code} (${email}, ${status}) and granted access.`
-      : `Granted existing user ${user_code} (${email}) access to this company (${status}).`,
+      ? `Created user ${user_code} (${givenEmail || "no email"}, ${status}) and granted access.`
+      : `Granted existing user ${user_code} (${givenEmail || "no email"}) access to this company (${status}).`,
     after: {
-      email,
+      email: givenEmail || null,
       user_code,
       full_name,
       role_id: role_id || null,

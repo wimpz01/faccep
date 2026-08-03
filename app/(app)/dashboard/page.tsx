@@ -3,7 +3,11 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 
 import { OccupancyDonut } from "@/components/occupancy-donut";
-import { Card, EmptyState, PageHeader, StatTile, formatDateTime } from "@/components/ui";
+import { Card, EmptyState, PageHeader, StatTile } from "@/components/ui";
+import {
+  UtilityUsageChart,
+  type UtilityUsagePoint,
+} from "@/components/utility-usage-chart";
 import { requireSession } from "@/lib/auth";
 import { derivedRate, reconcile, round3 } from "@/lib/billing";
 import { formatDate, money, monthsUntil } from "@/lib/format";
@@ -18,7 +22,12 @@ const DUE_SOON_DAYS = 2;
 const RENEWAL_NOTICE_MONTHS = 6;
 const PDC_HORIZON_DAYS = 30;
 
-export default async function DashboardPage() {
+export default async function DashboardPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ view?: string }>;
+}) {
+  const { view } = await searchParams;
   const context = await requireSession();
   if (!context.activeCompany) {
     redirect(context.isSuperAdmin ? "/admin/companies" : "/no-company");
@@ -36,12 +45,21 @@ export default async function DashboardPage() {
     .toISOString()
     .slice(0, 10);
   const monthStart = `${today.slice(0, 7)}-01`;
+  // A year of utility history, so the chart shows a full seasonal cycle.
+  const twelveMonthsAgo = new Date(
+    new Date().setMonth(new Date().getMonth() - 11),
+  )
+    .toISOString()
+    .slice(0, 8) + "01";
 
   const seeOccupancy = can(permissions, MODULE.dashboardOccupancy, "view");
   const seeIncome = can(permissions, MODULE.dashboardIncome, "view");
   const seeUtilities = can(permissions, MODULE.dashboardUtilities, "view");
   const seeNotifications = can(permissions, MODULE.dashboardNotifications, "view");
-  const seeAudit = can(permissions, MODULE.adminAudit, "view");
+  const seeCheques = can(permissions, MODULE.dashboardCheques, "view");
+  const showAttention = view === "attention";
+  const seesAnyPanel =
+    seeOccupancy || seeIncome || seeUtilities || seeNotifications || seeCheques;
 
   const [
     { data: locations },
@@ -50,7 +68,7 @@ export default async function DashboardPage() {
     { data: cheques },
     { data: paymentsThisMonth },
     { data: periods },
-    { data: activity },
+    { data: allCheques },
   ] = await Promise.all([
     seeOccupancy
       ? supabase
@@ -147,8 +165,9 @@ export default async function DashboardPage() {
             "id, utility, period_start, provider_amount, provider_consumption, locations(code), meter_readings(consumption)",
           )
           .eq("company_id", companyId)
+          .gte("period_start", twelveMonthsAgo)
           .order("period_start", { ascending: false })
-          .limit(6)
+          .limit(60)
           .returns<
             {
               id: string;
@@ -161,15 +180,37 @@ export default async function DashboardPage() {
             }[]
           >()
       : Promise.resolve({ data: null }),
-    seeAudit
+    seeCheques
       ? supabase
-          .from("audit_log")
-          .select("id, action, summary, actor_email, created_at")
+          .from("postdated_checks")
+          .select("id, amount, maturity_date, status")
           .eq("company_id", companyId)
-          .order("created_at", { ascending: false })
-          .limit(6)
+          .returns<
+            {
+              id: string;
+              amount: string;
+              maturity_date: string;
+              status: string;
+            }[]
+          >()
       : Promise.resolve({ data: null }),
   ]);
+
+  // The cheque panel counts every live cheque, not just the imminent ones the
+  // notification query narrows to.
+  const pdcRows = allCheques ?? [];
+  const pdcOnHand = pdcRows.filter(
+    (row) => row.status === "pending" || row.status === "matured",
+  );
+  const pdcMaturingSoon = pdcOnHand.filter(
+    (row) => row.maturity_date > today && row.maturity_date <= pdcCutoff,
+  );
+  const pdcPastMaturity = pdcOnHand.filter((row) => row.maturity_date <= today);
+  const pdcBounced = pdcRows.filter((row) => row.status === "bounced");
+  const pdcOnHandValue = pdcOnHand.reduce(
+    (sum, row) => sum + Number(row.amount),
+    0,
+  );
 
   // --- Occupancy -----------------------------------------------------------
   const occupancyRows = (locations ?? []).map((location) => {
@@ -238,12 +279,67 @@ export default async function DashboardPage() {
   const notificationCount =
     overdue.length + dueSoon.length + renewals.length + (cheques?.length ?? 0);
 
+  /**
+   * The same reconciliation the table shows, shaped for the chart.
+   *
+   * Only the share is plotted: electricity is kWh and water is cubic metres,
+   * so the raw figures cannot share an axis, but the proportion left
+   * unaccounted for can.
+   */
+  // Twelve month slots, oldest first, so a month never billed shows as a gap.
+  const utilityMonths = Array.from({ length: 12 }, (_, i) => {
+    const d = new Date();
+    d.setDate(1);
+    d.setMonth(d.getMonth() - (11 - i));
+    return {
+      key: d.toISOString().slice(0, 7),
+      label: d.toLocaleDateString("en-PH", { month: "short" }),
+    };
+  });
+
+  const utilityChartPoints: UtilityUsagePoint[] = (periods ?? []).map(
+    (period) => {
+      const tenantTotal = (period.meter_readings ?? []).reduce(
+        (sum, row) => sum + Number(row.consumption ?? 0),
+        0,
+      );
+      const check = reconcile(
+        Number(period.provider_consumption),
+        tenantTotal,
+      );
+      return {
+        periodId: period.id,
+        periodStart: period.period_start,
+        periodLabel: formatDate(period.period_start),
+        monthLabel: new Date(period.period_start + "T00:00:00").toLocaleDateString("en-PH", { month: "short" }),
+        utility: period.utility,
+        unbilledPct: check.percentage,
+        unbilledUnits: check.difference,
+        unit: period.utility === "water" ? "cu.m" : "kWh",
+        locationCode: period.locations?.code ?? "—",
+      };
+    },
+  );
+
   return (
     <>
       <PageHeader
         title={context.activeCompany.companyName}
         description="Occupancy, receivables and what needs attention this week."
       />
+
+      {/* Which panels a role sees is set per role, so somebody granted none
+          lands here on an empty page. Say so rather than show nothing. */}
+      {!seesAnyPanel ? (
+        <Card title="Nothing on your dashboard yet">
+          <p className="text-sm muted">
+            Your role does not include any dashboard panels. An administrator
+            can grant them under Administration → Roles &amp; permissions, in
+            the Dashboard group — occupancy, income, utility usage and the
+            notifications panel are each granted separately.
+          </p>
+        </Card>
+      ) : null}
 
       {chequesToDeposit.length > 0 ? (
         <div
@@ -303,11 +399,14 @@ export default async function DashboardPage() {
             label="Needs attention"
             value={notificationCount}
             hint="Overdue, due soon, renewals, cheques"
+            href={
+              showAttention ? "/dashboard" : "/dashboard?view=attention"
+            }
           />
         ) : null}
       </div>
 
-      {seeNotifications ? (
+      {seeNotifications && showAttention ? (
         <div className="mb-6">
           <Card
             title="Notifications"
@@ -524,6 +623,46 @@ export default async function DashboardPage() {
           </Card>
         ) : null}
 
+        {seeCheques ? (
+          <Card
+            title="Postdated cheques"
+            description="Cheques held on file, their maturity dates and where each one has got to."
+            action={
+              <Link href="/payments/pdc" className="btn btn-secondary btn-sm">
+                Cheque register
+              </Link>
+            }
+          >
+            <div className="grid gap-4 sm:grid-cols-2">
+              <StatTile
+                label="On hand"
+                value={money(pdcOnHandValue)}
+                hint={`${pdcOnHand.length} cheque(s)`}
+                tone="money"
+                href="/payments/pdc?view=onhand"
+              />
+              <StatTile
+                label="Maturing in 30 days"
+                value={pdcMaturingSoon.length}
+                hint="Prepare a deposit slip"
+                href="/payments/pdc?view=maturing"
+              />
+              <StatTile
+                label="Past maturity"
+                value={pdcPastMaturity.length}
+                hint="Not yet deposited"
+                href="/payments/pdc?view=due"
+              />
+              <StatTile
+                label="Bounced"
+                value={pdcBounced.length}
+                hint="Needs follow-up"
+                href="/payments/pdc?view=bounced"
+              />
+            </div>
+          </Card>
+        ) : null}
+
         {seeUtilities ? (
           <Card
             title="Utility usage"
@@ -531,7 +670,12 @@ export default async function DashboardPage() {
             bodyClassName=""
           >
             {periods && periods.length > 0 ? (
-              <div className="table-scroll">
+              <>
+                <div className="card-body" style={{ paddingBottom: 0 }}>
+                  <UtilityUsageChart points={utilityChartPoints} months={utilityMonths} />
+                </div>
+
+                <div className="table-scroll">
                 <table className="table">
                   <thead>
                     <tr>
@@ -589,48 +733,14 @@ export default async function DashboardPage() {
                     })}
                   </tbody>
                 </table>
-              </div>
+                </div>
+              </>
             ) : (
               <EmptyState>No utility periods recorded yet.</EmptyState>
             )}
           </Card>
         ) : null}
 
-        {seeAudit ? (
-          <Card
-            title="Recent activity"
-            action={
-              <Link href="/admin/audit" className="btn btn-secondary btn-sm">
-                View all
-              </Link>
-            }
-            bodyClassName=""
-          >
-            {activity && activity.length > 0 ? (
-              <div className="table-scroll">
-                <table className="table">
-                  <tbody>
-                    {activity.map((entry) => (
-                      <tr key={entry.id}>
-                        <td>
-                          <p className="text-sm">{entry.summary}</p>
-                          <p className="text-xs muted">
-                            {entry.actor_email} · {formatDateTime(entry.created_at)}
-                          </p>
-                        </td>
-                        <td className="text-right">
-                          <span className="badge">{entry.action}</span>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : (
-              <EmptyState>No activity recorded yet.</EmptyState>
-            )}
-          </Card>
-        ) : null}
       </div>
     </>
   );
