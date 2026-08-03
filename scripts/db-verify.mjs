@@ -1681,6 +1681,85 @@ async function main() {
     [matrix[0].invoices_view, matrix[0].invoices_edit],
     [true, false],
   );
+
+  /**
+   * A cashier holds edit on payments so they can take one, which for a while
+   * also let them void one outright -- the approval queue only stood in the
+   * way in the user interface. And the approver, who holds approve and
+   * nothing else, could not write the void they had just approved: the update
+   * matched no row and reported no error, so the request was marked approved
+   * while the payment stayed posted.
+   */
+  console.log("\nVoiding a payment needs sign-off");
+
+  const cashier = await makeUser("cashier");
+  const approver = await makeUser("approver");
+
+  const voidRoles = await db.query(`
+    insert into public.roles (company_id, name, description)
+    values (${lit(alpha)}, 'Verify Cashier',  'temporary'),
+           (${lit(alpha)}, 'Verify Approver', 'temporary')
+    returning id, name;
+  `);
+  const cashierRole = voidRoles.find((row) => row.name.endsWith("Cashier")).id;
+  const approverRole = voidRoles.find((row) => row.name.endsWith("Approver")).id;
+
+  await db.query(`
+    insert into public.role_permissions
+      (role_id, module_key, can_view, can_edit, can_delete, can_approve, can_void)
+    values (${lit(cashierRole)},  'payments', true, true,  false, false, false),
+           (${lit(approverRole)}, 'payments', true, false, false, true,  false);
+    insert into public.company_users (company_id, user_id, role_id)
+    values (${lit(alpha)}, ${lit(cashier)},  ${lit(cashierRole)}),
+           (${lit(alpha)}, ${lit(approver)}, ${lit(approverRole)});
+  `);
+
+  const voidTenant = (
+    await db.query(`
+      insert into public.tenants (company_id, company_name, is_vatable)
+      values (${lit(alpha)}, ${lit(`${TEST_TAG}-void`)}, true)
+      returning id;
+    `)
+  )[0].id;
+
+  const voidPayment = (
+    await db.query(`
+      insert into public.payments
+        (company_id, tenant_id, payment_no, payment_date, amount)
+      values (${lit(alpha)}, ${lit(voidTenant)}, ${lit(`${TEST_TAG}-OR2`)},
+              '2026-03-04', 1000)
+      returning id;
+    `)
+  )[0].id;
+
+  const voidSql = `update public.payments
+       set status = 'voided', voided_at = now(), void_reason = 'wrong amount'
+     where id = ${lit(voidPayment)};`;
+
+  check(
+    "a cashier may raise a void request",
+    await expectFailAsUser(
+      cashier,
+      `insert into public.approval_requests
+         (company_id, module_key, entity_table, entity_id, action, reason, requested_by)
+       values (${lit(alpha)}, 'payments', 'payments', ${lit(voidPayment)},
+               'void', 'keyed the wrong amount', ${lit(cashier)});`,
+    ),
+    "allowed",
+  );
+  check(
+    "a cashier cannot void a payment themselves",
+    await expectFailAsUser(cashier, voidSql),
+    "blocked",
+  );
+
+  const applied = await asUser(
+    approver,
+    `${voidSql}
+     select count(*)::int as n from public.payments
+      where id = ${lit(voidPayment)} and status = 'voided';`,
+  );
+  check("an approver can apply the void they signed off", applied[0].n, 1);
 }
 
 async function cleanup() {

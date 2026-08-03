@@ -185,17 +185,24 @@ export async function recordPayment(
   redirect(`/payments/${payment.id}`);
 }
 
-/** Voiding a posted payment is approval-gated (spec 7). */
+/**
+ * Voiding a posted payment is approval-gated (spec 7).
+ *
+ * Asking needs Edit, not Void. The cashier who keys the wrong amount is
+ * exactly the person who notices it, and asking changes nothing on its own —
+ * the payment stays posted until somebody with Approve signs it off. Demanding
+ * Void here would have meant only the people who can already void could ask,
+ * which left the cashier reading "ask a manager" with no way to.
+ */
 export async function requestPaymentVoid(
   _prevState: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
   try {
-    await assertPermission(MODULE.payments, "void");
+    await assertPermission(MODULE.payments, "edit");
   } catch (error) {
     return {
-      error:
-        "Voiding a payment needs the Void permission on payments — a Cashier cannot do it alone.",
+      error: "You need Edit on payments to request a void.",
     };
   }
 

@@ -43,6 +43,8 @@ export default async function PaymentDetailPage({
   const context = await requirePermission(MODULE.payments, "view");
   const companyId = context.activeCompany!.companyId;
   const canVoid = can(context.permissions, MODULE.payments, "void");
+  // Asking is not voiding — a cashier who keyed the wrong amount can raise it.
+  const canRequestVoid = can(context.permissions, MODULE.payments, "edit");
 
   const supabase = await createClient();
   const { data: payment } = await supabase
@@ -198,15 +200,22 @@ export default async function PaymentDetailPage({
 
       {payment.status === "posted" && !pendingVoid ? (
         <Card
-          title="Void this payment"
+          title={canVoid ? "Void this payment" : "Request a void"}
           description={
-            canVoid
-              ? "Requires approval. The record is kept and its effect reversed."
-              : "Voiding needs the Void permission on payments."
+            canRequestVoid
+              ? "A payment cannot be edited or deleted — a wrong amount is corrected by voiding it and recording it again. The record is kept and its effect reversed."
+              : "Correcting a payment needs Edit on payments."
           }
         >
-          {canVoid ? (
-            <VoidRequestForm action={requestPaymentVoid} paymentId={payment.id} />
+          {canRequestVoid ? (
+            <>
+              <p className="text-sm muted mb-3">
+                {canVoid
+                  ? "Goes to Approvals for sign-off. The payment stays posted until then."
+                  : "Sends the request to Approvals. The payment stays posted, and its invoices stay settled, until a manager signs it off."}
+              </p>
+              <VoidRequestForm action={requestPaymentVoid} paymentId={payment.id} />
+            </>
           ) : (
             <p className="text-sm muted">
               Ask a manager. A payment cannot be edited or deleted — only voided

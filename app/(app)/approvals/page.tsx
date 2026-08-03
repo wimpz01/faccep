@@ -1,14 +1,16 @@
 import type { Metadata } from "next";
 
-import { Card, EmptyState, PageHeader, formatDateTime } from "@/components/ui";
+import { PageHeader, TabBar } from "@/components/ui";
 import { requireSession } from "@/lib/auth";
 import { can, type ModuleRow } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
 
 import { decideApproval } from "./actions";
-import { DecideForm } from "./decide-form";
+import { ApprovalList, type ApprovalRow } from "./approval-list";
 
 export const metadata: Metadata = { title: "Approvals" };
+
+const TAB_ALL = "all";
 
 type RequestRow = {
   id: string;
@@ -25,7 +27,12 @@ type RequestRow = {
   decider: { full_name: string; email: string } | null;
 };
 
-export default async function ApprovalsPage() {
+export default async function ApprovalsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ tab?: string }>;
+}) {
+  const { tab } = await searchParams;
   const context = await requireSession();
   const companyId = context.activeCompany!.companyId;
   const supabase = await createClient();
@@ -51,10 +58,48 @@ export default async function ApprovalsPage() {
       .returns<ModuleRow[]>(),
   ]);
 
-  const moduleLabels = new Map((modules ?? []).map((mod) => [mod.key, mod.label]));
+  const moduleList = modules ?? [];
+  const moduleLabels = new Map(moduleList.map((mod) => [mod.key, mod.label]));
+  const moduleOrder = new Map(moduleList.map((mod) => [mod.key, mod.sort_order]));
   const rows = requests ?? [];
-  const pending = rows.filter((row) => row.status === "pending");
-  const decided = rows.filter((row) => row.status !== "pending");
+
+  /**
+   * A tab per module that actually has requests, in the side panel's own
+   * order. Deriving them from the rows rather than listing them by hand means
+   * a tab is never a dead end, and a newly approval-gated module gets its tab
+   * the moment somebody uses it.
+   */
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    counts.set(row.module_key, (counts.get(row.module_key) ?? 0) + 1);
+  }
+  const moduleTabs = [...counts.keys()].sort(
+    (a, b) =>
+      (moduleOrder.get(a) ?? 999) - (moduleOrder.get(b) ?? 999) ||
+      a.localeCompare(b),
+  );
+
+  const active = counts.has(tab ?? "") ? tab! : TAB_ALL;
+  const visible =
+    active === TAB_ALL ? rows : rows.filter((row) => row.module_key === active);
+
+  const toRow = (request: RequestRow): ApprovalRow => ({
+    id: request.id,
+    moduleLabel: moduleLabels.get(request.module_key) ?? request.module_key,
+    action: request.action,
+    reason: request.reason,
+    status: request.status,
+    requested_at: request.requested_at,
+    decided_at: request.decided_at,
+    decision_note: request.decision_note,
+    requester: request.requester?.email ?? "unknown",
+    decider: request.decider?.email ?? "—",
+    // Approve on this request's own module, not a blanket right.
+    canDecide: can(context.permissions, request.module_key, "approve"),
+  });
+
+  const pending = visible.filter((row) => row.status === "pending").map(toRow);
+  const decided = visible.filter((row) => row.status !== "pending").map(toRow);
 
   return (
     <>
@@ -63,123 +108,29 @@ export default async function ApprovalsPage() {
         description="Cancellations, voids and requests waiting for sign-off. Approving here also applies the change."
       />
 
-      <div className="mb-6">
-        <Card
-          title={`${pending.length} awaiting decision`}
-          bodyClassName=""
-        >
-          {pending.length > 0 ? (
-            <div className="table-scroll">
-              <table className="table">
-                <thead>
-                  <tr>
-                    <th>Requested</th>
-                    <th>Module</th>
-                    <th>Action</th>
-                    <th>Reason</th>
-                    <th style={{ minWidth: "14rem" }}>Decision</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {pending.map((request) => {
-                    const canDecide = can(
-                      context.permissions,
-                      request.module_key,
-                      "approve",
-                    );
-                    return (
-                      <tr key={request.id}>
-                        <td className="text-xs">
-                          {formatDateTime(request.requested_at)}
-                          <p className="muted">
-                            {request.requester?.email ?? "unknown"}
-                          </p>
-                        </td>
-                        <td className="text-xs">
-                          {moduleLabels.get(request.module_key) ?? request.module_key}
-                        </td>
-                        <td>
-                          <span className="badge">{request.action}</span>
-                        </td>
-                        <td className="text-sm">{request.reason}</td>
-                        <td>
-                          {canDecide ? (
-                            <DecideForm
-                              action={decideApproval}
-                              requestId={request.id}
-                            />
-                          ) : (
-                            <span className="text-xs muted">
-                              You do not have Approve on this module.
-                            </span>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <EmptyState>Nothing is waiting for approval.</EmptyState>
-          )}
-        </Card>
-      </div>
+      <TabBar
+        active={active}
+        tabs={[
+          {
+            value: TAB_ALL,
+            label: "All",
+            href: "/approvals",
+            count: rows.length,
+          },
+          ...moduleTabs.map((key) => ({
+            value: key,
+            label: moduleLabels.get(key) ?? key,
+            href: `/approvals?tab=${encodeURIComponent(key)}`,
+            count: counts.get(key),
+          })),
+        ]}
+      />
 
-      <Card title="Recently decided" bodyClassName="">
-        {decided.length > 0 ? (
-          <div className="table-scroll">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Decided</th>
-                  <th>Module</th>
-                  <th>Action</th>
-                  <th>Reason</th>
-                  <th>Outcome</th>
-                </tr>
-              </thead>
-              <tbody>
-                {decided.map((request) => (
-                  <tr key={request.id}>
-                    <td className="text-xs">
-                      {formatDateTime(request.decided_at)}
-                      <p className="muted">{request.decider?.email ?? "—"}</p>
-                    </td>
-                    <td className="text-xs">
-                      {moduleLabels.get(request.module_key) ?? request.module_key}
-                    </td>
-                    <td>
-                      <span className="badge">{request.action}</span>
-                    </td>
-                    <td className="text-sm">
-                      {request.reason}
-                      {request.decision_note ? (
-                        <p className="text-xs muted">{request.decision_note}</p>
-                      ) : null}
-                    </td>
-                    <td>
-                      <span
-                        className="badge"
-                        style={{
-                          color:
-                            request.status === "approved"
-                              ? "var(--success)"
-                              : "var(--danger)",
-                        }}
-                      >
-                        {request.status}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <EmptyState>No decisions recorded yet.</EmptyState>
-        )}
-      </Card>
+      <ApprovalList
+        pending={pending}
+        decided={decided}
+        decideAction={decideApproval}
+      />
     </>
   );
 }

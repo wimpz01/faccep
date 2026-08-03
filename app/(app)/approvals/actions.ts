@@ -109,33 +109,51 @@ type PendingRequest = {
   reason: string;
 };
 
+/**
+ * Applies one update and insists it actually landed.
+ *
+ * A row that row-level security filters out is not an error -- the update
+ * simply matches nothing and comes back clean. Without the returned row to
+ * check, an approval blocked by RLS looked identical to one that worked, and
+ * the request was marked approved while the record never moved. Asking for
+ * the row back turns that silence into a message somebody can act on.
+ */
+async function applyUpdate(
+  table: string,
+  entityId: string,
+  patch: Record<string, unknown>,
+): Promise<string | null> {
+  const supabase = await createClient();
+  const { data, error } = await supabase
+    .from(table)
+    .update(patch)
+    .eq("id", entityId)
+    .select("id");
+
+  if (error) return error.message;
+  if (!data || data.length === 0) {
+    return `The approval was not applied: nothing in ${table} changed. This usually means the account approving it cannot write to that record.`;
+  }
+  return null;
+}
+
 /** Carries out what the request asked for. Returns an error message or null. */
 async function applyEffect(request: PendingRequest): Promise<string | null> {
-  const supabase = await createClient();
-
   if (request.entity_table === "invoices" && request.action === "cancel") {
-    const { error } = await supabase
-      .from("invoices")
-      .update({
-        status: "cancelled",
-        cancelled_at: new Date().toISOString(),
-        cancellation_reason: request.reason,
-      })
-      .eq("id", request.entity_id);
-    return error?.message ?? null;
+    return applyUpdate("invoices", request.entity_id, {
+      status: "cancelled",
+      cancelled_at: new Date().toISOString(),
+      cancellation_reason: request.reason,
+    });
   }
 
   if (request.entity_table === "payments" && request.action === "void") {
-    const { error } = await supabase
-      .from("payments")
-      .update({
-        status: "voided",
-        voided_at: new Date().toISOString(),
-        void_reason: request.reason,
-      })
-      .eq("id", request.entity_id);
     // The payments_settle trigger reopens every invoice the payment touched.
-    return error?.message ?? null;
+    return applyUpdate("payments", request.entity_id, {
+      status: "voided",
+      voided_at: new Date().toISOString(),
+      void_reason: request.reason,
+    });
   }
 
   /**
@@ -144,41 +162,27 @@ async function applyEffect(request: PendingRequest): Promise<string | null> {
    * the two happen together.
    */
   if (request.entity_table === "check_vouchers" && request.action === "approve") {
-    const { error } = await supabase
-      .from("check_vouchers")
-      .update({
-        status: "released",
-        released_at: new Date().toISOString(),
-      })
-      .eq("id", request.entity_id);
-    return error?.message ?? null;
+    return applyUpdate("check_vouchers", request.entity_id, {
+      status: "released",
+      released_at: new Date().toISOString(),
+    });
   }
 
   if (request.entity_table === "vendors" && request.action === "approve") {
-    const { error } = await supabase
-      .from("vendors")
-      .update({ status: "approved" })
-      .eq("id", request.entity_id);
-    return error?.message ?? null;
+    return applyUpdate("vendors", request.entity_id, { status: "approved" });
   }
 
   if (request.entity_table === "postdated_checks" && request.action === "cancel") {
-    const { error } = await supabase
-      .from("postdated_checks")
-      .update({
-        status: "cancelled",
-        notes: request.reason,
-      })
-      .eq("id", request.entity_id);
-    return error?.message ?? null;
+    return applyUpdate("postdated_checks", request.entity_id, {
+      status: "cancelled",
+      notes: request.reason,
+    });
   }
 
   if (request.entity_table === "purchase_requests" && request.action === "approve") {
-    const { error } = await supabase
-      .from("purchase_requests")
-      .update({ status: "approved" })
-      .eq("id", request.entity_id);
-    return error?.message ?? null;
+    return applyUpdate("purchase_requests", request.entity_id, {
+      status: "approved",
+    });
   }
 
   return `No effect is defined for ${request.action} on ${request.entity_table}.`;
