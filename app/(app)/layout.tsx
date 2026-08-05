@@ -90,6 +90,8 @@ export default async function AppLayout({
   }
   if (can(permissions, MODULE.inventoryItems, "view")) {
     inventory.push({ href: "/inventory/categories", label: "Categories" });
+    inventory.push({ href: "/inventory/non-stock", label: "Non-stock items" });
+    inventory.push({ href: "/inventory/accounts", label: "Item accounts" });
   }
   if (can(permissions, MODULE.inventoryTools, "view")) {
     inventory.push({ href: "/inventory/tools", label: "Tools & equipment" });
