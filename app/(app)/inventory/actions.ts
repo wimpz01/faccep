@@ -1,6 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
 import { z } from "zod";
 
 import { logAudit } from "@/lib/audit";
@@ -440,13 +441,71 @@ export async function returnTool(formData: FormData) {
 
   revalidatePath("/inventory/tools");
 }
-
 // ---------------------------------------------------------------------------
-// Stock adjustment: a numbered document carrying as many lines as the count
-// needed. The database issues the number and posts each line to the ledger.
+// Stock adjustment: a numbered document that is saved first and posted when
+// somebody is ready. Saving touches no stock; posting writes the ledger.
 // ---------------------------------------------------------------------------
 
-export async function createAdjustment(
+type AdjustmentLine = {
+  item_id: string;
+  quantity: number;
+  unit_cost: number | null;
+  note: string | null;
+};
+
+/** Reads the repeated line fields off the form into something storable. */
+function readLines(
+  formData: FormData,
+  kind: string,
+): { lines: AdjustmentLine[] } | { error: string } {
+  const itemIds = formData.getAll("line_item_id").map(String);
+  const quantities = formData.getAll("line_quantity").map(String);
+  const directions = formData.getAll("line_direction").map(String);
+  const costs = formData.getAll("line_unit_cost").map(String);
+  const notes = formData.getAll("line_note").map(String);
+
+  const lines: AdjustmentLine[] = [];
+  for (let i = 0; i < itemIds.length; i += 1) {
+    const itemId = itemIds[i];
+    // A blank row is somebody who added a line and changed their mind.
+    if (!itemId) continue;
+
+    const magnitude = Number(quantities[i] ?? 0);
+    if (!Number.isFinite(magnitude) || magnitude <= 0) {
+      return { error: `Line ${i + 1}: enter a quantity greater than zero.` };
+    }
+
+    const rawCost = (costs[i] ?? "").trim();
+    const unitCost = rawCost === "" ? null : Number(rawCost);
+    if (unitCost !== null && (!Number.isFinite(unitCost) || unitCost < 0)) {
+      return { error: `Line ${i + 1}: unit cost cannot be negative.` };
+    }
+
+    // The document's kind decides the direction; a count correction is the
+    // only one that can go either way.
+    const goesOut =
+      kind === "issue" || (kind === "adjustment" && directions[i] === "down");
+
+    lines.push({
+      item_id: itemId,
+      quantity: goesOut ? -magnitude : magnitude,
+      unit_cost: unitCost,
+      note: notes[i]?.trim() || null,
+    });
+  }
+
+  if (lines.length === 0) return { error: "Add at least one item line." };
+  return { lines };
+}
+
+/**
+ * Saves a draft, and posts it when that is what was asked for.
+ *
+ * One action behind two buttons: the submitter says which. Saving and posting
+ * share every step except the last, and splitting them would have meant two
+ * copies of the same validation.
+ */
+export async function saveAdjustment(
   _prevState: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
@@ -460,103 +519,257 @@ export async function createAdjustment(
     return { error: (error as Error).message };
   }
 
+  const intent = String(formData.get("intent") ?? "save");
+  const id = String(formData.get("adjustment_id") ?? "").trim();
   const reason = String(formData.get("reason") ?? "").trim();
+  const kind = String(formData.get("movement_kind") ?? "adjustment");
   const adjustmentDate = String(formData.get("adjustment_date") ?? "").trim();
 
-  const itemIds = formData.getAll("line_item_id").map(String);
-  const kinds = formData.getAll("line_kind").map(String);
-  const quantities = formData.getAll("line_quantity").map(String);
-  const directions = formData.getAll("line_direction").map(String);
-  const costs = formData.getAll("line_unit_cost").map(String);
-  const notes = formData.getAll("line_note").map(String);
-
-  type Line = {
-    item_id: string;
-    movement_kind: string;
-    quantity: number;
-    unit_cost: number | null;
-    note: string | null;
-  };
-
-  const lines: Line[] = [];
-  for (let i = 0; i < itemIds.length; i += 1) {
-    const itemId = itemIds[i];
-    // A blank row is somebody who added a line and changed their mind.
-    if (!itemId) continue;
-
-    const kind = kinds[i] ?? "";
-    const magnitude = Number(quantities[i] ?? 0);
-
-    if (!["receipt", "issue", "return", "adjustment"].includes(kind)) {
-      return { error: `Line ${i + 1}: unknown movement type.` };
-    }
-    if (!Number.isFinite(magnitude) || magnitude <= 0) {
-      return { error: `Line ${i + 1}: enter a quantity greater than zero.` };
-    }
-
-    // Left blank, the item's own cost is used when the line posts.
-    const rawCost = (costs[i] ?? "").trim();
-    const unitCost = rawCost === "" ? null : Number(rawCost);
-    if (unitCost !== null && (!Number.isFinite(unitCost) || unitCost < 0)) {
-      return { error: `Line ${i + 1}: unit cost cannot be negative.` };
-    }
-
-    // The ledger stores a signed quantity; the form asks for a direction.
-    const goesOut =
-      kind === "issue" || (kind === "adjustment" && directions[i] === "down");
-
-    lines.push({
-      item_id: itemId,
-      movement_kind: kind,
-      quantity: goesOut ? -magnitude : magnitude,
-      unit_cost: unitCost,
-      note: notes[i]?.trim() || null,
-    });
+  if (!reason) return { error: "Give a reason for the adjustment." };
+  if (!["receipt", "issue", "return", "adjustment"].includes(kind)) {
+    return { error: "Choose a type for the adjustment." };
   }
 
-  if (lines.length === 0) return { error: "Add at least one item line." };
-  if (!reason) return { error: "Give a reason for the adjustment." };
+  const parsed = readLines(formData, kind);
+  if ("error" in parsed) return { error: parsed.error };
 
   const supabase = await createClient();
+  let adjustmentId = id;
 
-  const { data: head, error: headError } = await supabase
-    .from("inventory_adjustments")
-    .insert({
-      company_id: companyId,
-      reason,
-      adjustment_date: adjustmentDate || undefined,
-      created_by: userId,
-    })
-    .select("id, adjustment_no")
-    .single();
+  if (adjustmentId) {
+    const { error } = await supabase
+      .from("inventory_adjustments")
+      .update({
+        reason,
+        movement_kind: kind,
+        adjustment_date: adjustmentDate || undefined,
+      })
+      .eq("id", adjustmentId);
+    if (error) return { error: error.message };
 
-  if (headError || !head) {
-    return { error: headError?.message ?? "Could not open the adjustment." };
+    // Replacing the lines wholesale keeps the saved document identical to
+    // what is on screen, including anything removed.
+    const { error: clearError } = await supabase
+      .from("inventory_adjustment_lines")
+      .delete()
+      .eq("adjustment_id", adjustmentId);
+    if (clearError) return { error: clearError.message };
+  } else {
+    const { data: head, error } = await supabase
+      .from("inventory_adjustments")
+      .insert({
+        company_id: companyId,
+        reason,
+        movement_kind: kind,
+        adjustment_date: adjustmentDate || undefined,
+        created_by: userId,
+      })
+      .select("id")
+      .single();
+    if (error || !head) {
+      return { error: error?.message ?? "Could not open the adjustment." };
+    }
+    adjustmentId = head.id;
   }
 
   const { error: lineError } = await supabase
     .from("inventory_adjustment_lines")
-    .insert(lines.map((line) => ({ ...line, adjustment_id: head.id })));
+    .insert(
+      parsed.lines.map((line) => ({ ...line, adjustment_id: adjustmentId })),
+    );
+  if (lineError) return { error: lineError.message };
 
-  if (lineError) {
-    // The header is worthless without its lines, so it does not stay behind.
-    await supabase.from("inventory_adjustments").delete().eq("id", head.id);
-    return { error: lineError.message };
+  if (intent === "post") {
+    const { data: posted, error: postError } = await supabase
+      .from("inventory_adjustments")
+      .update({ status: "posted" })
+      .eq("id", adjustmentId)
+      .select("adjustment_no")
+      .single();
+    if (postError) return { error: postError.message };
+
+    await logAudit({
+      action: "create",
+      moduleKey: MODULE.inventoryMovements,
+      entityTable: "inventory_adjustments",
+      entityId: adjustmentId,
+      summary: `${posted?.adjustment_no}: ${parsed.lines.length} line(s) posted — ${reason}`,
+      after: { lines: parsed.lines.length, reason, kind },
+    });
+  }
+
+  revalidatePath("/inventory");
+  revalidatePath("/inventory/adjustments");
+  revalidatePath(`/inventory/adjustments/${adjustmentId}`);
+  revalidatePath("/inventory/history");
+  redirect(`/inventory/adjustments/${adjustmentId}`);
+}
+
+/** Throws away a draft. A posted adjustment is never deleted. */
+export async function deleteAdjustment(formData: FormData) {
+  await assertPermission(MODULE.inventoryMovements, "edit");
+
+  const id = String(formData.get("adjustment_id") ?? "");
+  const supabase = await createClient();
+
+  const { data: head } = await supabase
+    .from("inventory_adjustments")
+    .select("status, adjustment_no")
+    .eq("id", id)
+    .single();
+
+  // The database refuses to delete a posted one anyway; this is so the person
+  // gets told rather than watching nothing happen.
+  if (!head || head.status !== "draft") return;
+
+  await supabase.from("inventory_adjustments").delete().eq("id", id);
+
+  revalidatePath("/inventory/adjustments");
+  redirect("/inventory/adjustments");
+}
+
+// ---------------------------------------------------------------------------
+// Non-stock items: bought but never stocked, each carrying the expense
+// account it is charged to.
+// ---------------------------------------------------------------------------
+
+const nonStockSchema = z.object({
+  name: z.string().trim().min(2, "Give the item a name."),
+  description: z.string().trim().nullish(),
+  unit_of_measure: z.string().trim().min(1, "Unit of measure is required."),
+  default_cost: z.coerce.number().min(0, "Cost cannot be negative."),
+  expense_account_id: z.string().uuid("Choose the expense account it is charged to."),
+});
+
+export async function createNonStockItem(
+  _prevState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  let companyId: string;
+  try {
+    const context = await assertPermission(MODULE.inventoryItems, "edit");
+    companyId = context.activeCompany!.companyId;
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+
+  const parsed = nonStockSchema.safeParse({
+    name: formData.get("name"),
+    description: formData.get("description"),
+    unit_of_measure: formData.get("unit_of_measure") || "lot",
+    default_cost: formData.get("default_cost") || 0,
+    expense_account_id: formData.get("expense_account_id"),
+  });
+  if (!parsed.success) return { error: parsed.error.issues[0].message };
+
+  const supabase = await createClient();
+  const { data, error } = await supabase
+    .from("non_stock_items")
+    .insert({
+      company_id: companyId,
+      ...parsed.data,
+      description: parsed.data.description || null,
+    })
+    .select("id, code")
+    .single();
+
+  if (error) {
+    return {
+      error:
+        error.code === "23505"
+          ? "A non-stock item with that name already exists."
+          : error.message,
+    };
   }
 
   await logAudit({
     action: "create",
-    moduleKey: MODULE.inventoryMovements,
-    entityTable: "inventory_adjustments",
-    entityId: head.id,
-    summary: `${head.adjustment_no}: ${lines.length} line(s) — ${reason}`,
-    after: { lines: lines.length, reason },
+    moduleKey: MODULE.inventoryItems,
+    entityTable: "non_stock_items",
+    entityId: data.id,
+    summary: `Added non-stock item ${data.code} "${parsed.data.name}".`,
+    after: parsed.data,
   });
 
-  revalidatePath("/inventory");
-  revalidatePath("/inventory/adjustments");
-  revalidatePath("/inventory/history");
-  return {
-    success: `${head.adjustment_no} posted — ${lines.length} line(s) applied to stock.`,
-  };
+  revalidatePath("/inventory/non-stock");
+  return { success: `${data.code} — "${parsed.data.name}" added.` };
+}
+
+/** Points an existing non-stock item at a different expense account. */
+export async function updateNonStockAccount(
+  _prevState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  try {
+    await assertPermission(MODULE.inventoryItems, "edit");
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+
+  const id = String(formData.get("item_id") ?? "");
+  const accountId = String(formData.get("expense_account_id") ?? "");
+  if (!id || !accountId) return { error: "Choose an account." };
+
+  const supabase = await createClient();
+  const { error } = await supabase
+    .from("non_stock_items")
+    .update({ expense_account_id: accountId })
+    .eq("id", id);
+  if (error) return { error: error.message };
+
+  revalidatePath("/inventory/non-stock");
+  return { success: "Account updated. Purchases already made keep the account they were charged to." };
+}
+
+/** Sets where corrections to one stock item are charged. */
+export async function updateItemAdjustmentAccount(
+  _prevState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  try {
+    await assertPermission(MODULE.inventoryItems, "edit");
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+
+  const id = String(formData.get("item_id") ?? "");
+  const accountId = String(formData.get("adjustment_account_id") ?? "");
+  if (!id) return { error: "Item not found." };
+
+  const supabase = await createClient();
+  const { error } = await supabase
+    .from("inventory_items")
+    // Blank means fall back to the company's inventory adjustment account.
+    .update({ adjustment_account_id: accountId || null })
+    .eq("id", id);
+  if (error) return { error: error.message };
+
+  revalidatePath("/inventory/accounts");
+  return { success: "Account saved." };
+}
+
+/** Sets which account one stock item is held in. */
+export async function updateItemStockAccount(
+  _prevState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  try {
+    await assertPermission(MODULE.inventoryItems, "edit");
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+
+  const id = String(formData.get("item_id") ?? "");
+  const accountId = String(formData.get("inventory_account_id") ?? "");
+  if (!id) return { error: "Item not found." };
+
+  const supabase = await createClient();
+  const { error } = await supabase
+    .from("inventory_items")
+    .update({ inventory_account_id: accountId || null })
+    .eq("id", id);
+  if (error) return { error: error.message };
+
+  revalidatePath("/inventory/accounts");
+  return { success: "Account saved." };
 }

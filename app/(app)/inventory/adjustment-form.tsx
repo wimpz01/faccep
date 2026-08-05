@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useActionState, useState } from "react";
 import { useFormStatus } from "react-dom";
 
@@ -16,13 +17,19 @@ export type AdjustItem = {
   unit_cost: string;
 };
 
+export type ExistingLine = {
+  item_id: string;
+  quantity: string;
+  unit_cost: string | null;
+  note: string | null;
+};
+
 type Line = {
   key: number;
   itemId: string;
   /** What has been typed into the SKU box: a code, or part of a name. */
   search: string;
   open: boolean;
-  kind: string;
   direction: string;
   quantity: string;
   unitCost: string;
@@ -34,19 +41,35 @@ const blank = (key: number): Line => ({
   itemId: "",
   search: "",
   open: false,
-  kind: "adjustment",
   direction: "up",
   quantity: "",
   unitCost: "",
   note: "",
 });
 
-function Submit() {
+function Buttons({ hasId }: { hasId: boolean }) {
   const { pending } = useFormStatus();
   return (
-    <button type="submit" className="btn btn-primary" disabled={pending}>
-      {pending ? "Posting…" : "Post adjustment"}
-    </button>
+    <>
+      <button
+        type="submit"
+        name="intent"
+        value="save"
+        className="btn btn-secondary"
+        disabled={pending}
+      >
+        {pending ? "Working…" : hasId ? "Save changes" : "Save as draft"}
+      </button>
+      <button
+        type="submit"
+        name="intent"
+        value="post"
+        className="btn btn-primary"
+        disabled={pending}
+      >
+        {pending ? "Working…" : "Post adjustment"}
+      </button>
+    </>
   );
 }
 
@@ -59,48 +82,62 @@ function matches(item: AdjustItem, search: string) {
 }
 
 /**
- * One adjustment, as many lines as the count needed.
+ * One adjustment: a type, a reason, and as many lines as the count needed.
  *
- * The number is not asked for -- the database issues it on save, the same way
- * a goods receipt or a voucher gets its own. Each line starts from the SKU
- * box, which takes a code or a name and narrows as it is typed into; choosing
- * a result fills in the item and what is on hand, because an adjustment is
- * only ever as good as picking the right item.
+ * Saving and posting are different things. A draft holds its lines and moves
+ * no stock, so a count can be written down, left, and thought about; posting
+ * is what writes the ledger, and once posted the document is closed.
  */
 export function AdjustmentForm({
   action,
   items,
+  adjustmentId,
+  initialKind = "adjustment",
+  initialDate,
+  initialReason = "",
+  initialLines = [],
 }: {
   action: (state: ActionState, formData: FormData) => Promise<ActionState>;
   items: AdjustItem[];
+  adjustmentId?: string;
+  initialKind?: string;
+  initialDate?: string;
+  initialReason?: string;
+  initialLines?: ExistingLine[];
 }) {
   const [state, formAction] = useActionState<ActionState, FormData>(action, {});
-  const [lines, setLines] = useState<Line[]>([blank(1)]);
-  const [nextKey, setNextKey] = useState(2);
-  // Which line the browse window is filling in, and what is typed into it.
-  const [pickerFor, setPickerFor] = useState<number | null>(null);
+  const [kind, setKind] = useState(initialKind);
+
+  const seed: Line[] =
+    initialLines.length > 0
+      ? initialLines.map((line, index) => {
+          const item = items.find((option) => option.id === line.item_id);
+          const quantity = Number(line.quantity);
+          return {
+            key: index + 1,
+            itemId: line.item_id,
+            search: item?.sku ?? item?.name ?? "",
+            open: false,
+            direction: quantity < 0 ? "down" : "up",
+            quantity: String(Math.abs(quantity)),
+            unitCost: line.unit_cost ? String(Number(line.unit_cost)) : "",
+            note: line.note ?? "",
+          };
+        })
+      : [blank(1)];
+
+  const [lines, setLines] = useState<Line[]>(seed);
+  const [nextKey, setNextKey] = useState(seed.length + 1);
+  const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerSearch, setPickerSearch] = useState("");
-  // Items ticked in the browse window, waiting to be added together.
   const [ticked, setTicked] = useState<string[]>([]);
+  const [flash, setFlash] = useState<string | null>(null);
 
   const update = (key: number, patch: Partial<Line>) =>
     setLines((rows) =>
       rows.map((row) => (row.key === key ? { ...row, ...patch } : row)),
     );
 
-  const chooseFor = (key: number, option: AdjustItem) =>
-    update(key, {
-      itemId: option.id,
-      search: option.sku ?? option.name,
-      open: false,
-      // Preloaded from the item, but the line may carry its own.
-      unitCost: String(Number(option.unit_cost)),
-    });
-
-  const itemById = new Map(items.map((item) => [item.id, item]));
-  const picked = items.filter((item) => matches(item, pickerSearch));
-
-  /** What one item looks like once it has been dropped onto a line. */
   const filled = (line: Line, option: AdjustItem): Line => ({
     ...line,
     itemId: option.id,
@@ -110,41 +147,81 @@ export function AdjustmentForm({
   });
 
   /**
-   * Adds everything ticked in one go.
+   * Puts one item on the sheet.
    *
-   * The line the window was opened from takes the first item, and the rest
-   * follow straight after it, so ticking four items leaves four lines in the
-   * order they were listed rather than one line and three somewhere else.
+   * An item already on a line stays on that one line -- the same thing counted
+   * twice is one correction, not two -- so this only says so and stops there.
+   * Otherwise it fills the first empty line, or adds one.
    */
-  const addTicked = () => {
-    const chosen = items.filter((item) => ticked.includes(item.id));
-    if (chosen.length === 0 || pickerFor === null) return;
+  const addMany = (options: AdjustItem[]) => {
+    let key = nextKey;
 
     setLines((rows) => {
-      const at = rows.findIndex((row) => row.key === pickerFor);
-      if (at < 0) return rows;
-
-      const next = rows.map((row) =>
-        row.key === pickerFor ? filled(row, chosen[0]) : row,
-      );
-      const extra = chosen
-        .slice(1)
-        .map((option, i) => filled(blank(nextKey + i), option));
-      next.splice(at + 1, 0, ...extra);
-      return next;
+      const out = [...rows];
+      for (const option of options) {
+        if (out.some((row) => row.itemId === option.id)) continue;
+        const at = out.findIndex((row) => !row.itemId);
+        if (at >= 0) out[at] = filled(out[at], option);
+        else out.push(filled(blank(key++), option));
+      }
+      return out;
     });
+    setNextKey(key + options.length);
 
-    setNextKey((key) => key + Math.max(chosen.length - 1, 0));
-    setTicked([]);
-    setPickerFor(null);
+    // Worked out from the state this render can see, because the updater above
+    // does not run until React re-renders.
+    const already = options.filter((option) =>
+      lines.some((row) => row.itemId === option.id),
+    );
+    const added = options.length - already.length;
+    setFlash(
+      already.length === 1 && added === 0
+        ? `${already[0].name} is already on the sheet.`
+        : `${added} added${already.length > 0 ? `, ${already.length} already there` : ""}.`,
+    );
   };
+
+  const addItem = (option: AdjustItem) => addMany([option]);
+
+  const addTicked = () => {
+    addMany(items.filter((item) => ticked.includes(item.id)));
+    setTicked([]);
+    setPickerOpen(false);
+  };
+
+  const itemById = new Map(items.map((item) => [item.id, item]));
+  const picked = items.filter((item) => matches(item, pickerSearch));
+  const onSheet = new Set(lines.map((line) => line.itemId).filter(Boolean));
+  // Only a count correction can go either way; the rest have one direction.
+  const showsDirection = kind === "adjustment";
 
   return (
     <form action={formAction} className="grid gap-4">
-      <div className="grid gap-4 sm:grid-cols-3">
+      {adjustmentId ? (
+        <input type="hidden" name="adjustment_id" value={adjustmentId} />
+      ) : null}
+
+      <div className="grid gap-4 sm:grid-cols-4">
         <div>
           <p className="label">Adjustment #</p>
           <input className="input" placeholder="Issued on save" disabled readOnly />
+        </div>
+        <div>
+          <label className="label" htmlFor="adjustment-kind">
+            Type *
+          </label>
+          <select
+            id="adjustment-kind"
+            name="movement_kind"
+            className="select"
+            value={kind}
+            onChange={(event) => setKind(event.currentTarget.value)}
+          >
+            <option value="adjustment">Count correction</option>
+            <option value="receipt">Receipt — in</option>
+            <option value="return">Return — in</option>
+            <option value="issue">Issue — out</option>
+          </select>
         </div>
         <div>
           <label className="label" htmlFor="adjustment-date">
@@ -155,7 +232,7 @@ export function AdjustmentForm({
             name="adjustment_date"
             type="date"
             className="input"
-            defaultValue={new Date().toISOString().slice(0, 10)}
+            defaultValue={initialDate ?? new Date().toISOString().slice(0, 10)}
           />
         </div>
         <div>
@@ -167,6 +244,7 @@ export function AdjustmentForm({
             name="reason"
             className="input"
             required
+            defaultValue={initialReason}
             placeholder="Annual stock count"
           />
         </div>
@@ -179,11 +257,10 @@ export function AdjustmentForm({
               <th style={{ minWidth: "13rem" }}>SKU #</th>
               <th style={{ minWidth: "18rem" }}>Item</th>
               <th>On hand</th>
-              <th style={{ width: "12rem" }}>Type</th>
-              <th style={{ width: "13rem" }}>Quantity</th>
+              <th style={{ width: showsDirection ? "13rem" : "8rem" }}>Quantity</th>
               <th style={{ width: "8rem" }}>Unit cost</th>
               <th style={{ minWidth: "15rem" }}>Note</th>
-              <th />
+              <th style={{ width: "3rem" }} />
             </tr>
           </thead>
           <tbody>
@@ -193,50 +270,48 @@ export function AdjustmentForm({
                 ? items.filter((option) => matches(option, line.search)).slice(0, 8)
                 : [];
 
-              const choose = (option: AdjustItem) => chooseFor(line.key, option);
-
               return (
                 <tr key={line.key}>
                   <td style={{ position: "relative" }}>
-                    {/* The action reads this; it is always present so every
-                        line keeps its place in the submitted order. */}
                     <input type="hidden" name="line_item_id" value={line.itemId} />
                     <div className="flex gap-1 items-center">
-                    <input
-                      className="input"
-                      value={line.search}
-                      autoComplete="off"
-                      placeholder="Type a SKU or item name"
-                      onFocus={() => update(line.key, { open: true })}
-                      onBlur={() =>
-                        // Let a click on a result land before this closes it.
-                        setTimeout(() => update(line.key, { open: false }), 150)
-                      }
-                      onChange={(event) =>
-                        update(line.key, {
-                          search: event.currentTarget.value,
-                          // Typing again means the earlier choice no longer holds.
-                          itemId: "",
-                          open: true,
-                        })
-                      }
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter" && found.length > 0) {
-                          event.preventDefault();
-                          choose(found[0]);
+                      <input
+                        className="input"
+                        value={line.search}
+                        autoComplete="off"
+                        placeholder="Type a SKU or item name"
+                        onFocus={() => update(line.key, { open: true })}
+                        onBlur={() =>
+                          setTimeout(() => update(line.key, { open: false }), 150)
                         }
-                        if (event.key === "Escape") update(line.key, { open: false });
-                      }}
-                    />
+                        onChange={(event) =>
+                          update(line.key, {
+                            search: event.currentTarget.value,
+                            itemId: "",
+                            open: true,
+                          })
+                        }
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" && found.length > 0) {
+                            event.preventDefault();
+                            update(line.key, {
+                              ...filled(line, found[0]),
+                              key: line.key,
+                            });
+                          }
+                          if (event.key === "Escape") update(line.key, { open: false });
+                        }}
+                      />
                       <button
                         type="button"
                         className="btn btn-secondary btn-sm"
                         title="Browse the item list"
                         aria-label="Browse the item list"
                         onClick={() => {
-                          setPickerFor(line.key);
+                          setPickerOpen(true);
                           setPickerSearch("");
                           setTicked([]);
+                          setFlash(null);
                         }}
                       >
                         <svg
@@ -284,7 +359,10 @@ export function AdjustmentForm({
                               }}
                               onMouseDown={(event) => {
                                 event.preventDefault();
-                                choose(option);
+                                update(line.key, {
+                                  ...filled(line, option),
+                                  key: line.key,
+                                });
                               }}
                             >
                               <span className="tabular-nums muted">
@@ -303,11 +381,7 @@ export function AdjustmentForm({
                     ) : null}
                   </td>
                   <td className="text-sm">
-                    {item ? (
-                      item.name
-                    ) : (
-                      <span className="muted">—</span>
-                    )}
+                    {item ? item.name : <span className="muted">—</span>}
                   </td>
                   <td className="text-xs tabular-nums">
                     {item
@@ -315,43 +389,21 @@ export function AdjustmentForm({
                       : "—"}
                   </td>
                   <td>
-                    <select
-                      name="line_kind"
-                      className="select"
-                      // The column width alone does not reach the control, and
-                      // "Count correction" has to read in full.
-                      style={{ width: "11rem" }}
-                      value={line.kind}
-                      onChange={(event) =>
-                        update(line.key, { kind: event.currentTarget.value })
-                      }
-                    >
-                      <option value="adjustment">Count correction</option>
-                      <option value="receipt">Receipt — in</option>
-                      <option value="return">Return — in</option>
-                      <option value="issue">Issue — out</option>
-                    </select>
-                  </td>
-                  <td>
                     <div className="flex gap-1">
-                      {line.kind === "adjustment" ? (
+                      {showsDirection ? (
                         <select
                           name="line_direction"
                           className="select"
                           style={{ width: "5.25rem", flex: "0 0 auto" }}
                           value={line.direction}
                           onChange={(event) =>
-                            update(line.key, {
-                              direction: event.currentTarget.value,
-                            })
+                            update(line.key, { direction: event.currentTarget.value })
                           }
                         >
                           <option value="up">+</option>
                           <option value="down">−</option>
                         </select>
                       ) : (
-                        // Always submitted, so every line has a direction at
-                        // the same index as its item.
                         <input type="hidden" name="line_direction" value="up" />
                       )}
                       <input
@@ -395,20 +447,21 @@ export function AdjustmentForm({
                     />
                   </td>
                   <td>
-                    {lines.length > 1 ? (
-                      <button
-                        type="button"
-                        className="btn btn-secondary btn-sm"
-                        onClick={() =>
-                          setLines((rows) =>
-                            rows.filter((row) => row.key !== line.key),
-                          )
-                        }
-                        aria-label="Remove this line"
-                      >
-                        Remove
-                      </button>
-                    ) : null}
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      title="Remove this line"
+                      aria-label="Remove this line"
+                      onClick={() =>
+                        setLines((rows) => {
+                          const left = rows.filter((row) => row.key !== line.key);
+                          // Never leave the sheet with nothing to type into.
+                          return left.length > 0 ? left : [blank(nextKey)];
+                        })
+                      }
+                    >
+                      ×
+                    </button>
                   </td>
                 </tr>
               );
@@ -428,7 +481,10 @@ export function AdjustmentForm({
         >
           + Add line
         </button>
-        <Submit />
+        <Buttons hasId={Boolean(adjustmentId)} />
+        <Link href="/inventory/adjustments" className="btn btn-secondary">
+          Cancel
+        </Link>
         <FormError message={state.error} />
         {state.success ? (
           <p className="text-sm" style={{ color: "var(--success)" }}>
@@ -436,15 +492,17 @@ export function AdjustmentForm({
           </p>
         ) : null}
       </div>
+      <p className="text-xs muted">
+        Saving keeps it as a draft and moves no stock. Posting writes it to the
+        ledger, and a posted adjustment cannot be taken back.
+      </p>
 
-      {/* The whole item list, for when the code is not already known. Typing
-          narrows it the same way the SKU box does -- by code or by name. */}
-      {pickerFor !== null ? (
+      {pickerOpen ? (
         <div
           role="dialog"
           aria-modal="true"
           aria-label="Choose an item"
-          onClick={() => setPickerFor(null)}
+          onClick={() => setPickerOpen(false)}
           style={{
             position: "fixed",
             inset: 0,
@@ -459,20 +517,25 @@ export function AdjustmentForm({
           <div
             className="card"
             onClick={(event) => event.stopPropagation()}
-            style={{ width: "min(46rem, 100%)", maxHeight: "80vh", display: "flex", flexDirection: "column" }}
+            style={{
+              width: "min(46rem, 100%)",
+              maxHeight: "80vh",
+              display: "flex",
+              flexDirection: "column",
+            }}
           >
             <div className="card-body" style={{ paddingBottom: "0.75rem" }}>
               <div className="flex items-center justify-between gap-3 mb-3">
                 <div>
                   <h3 className="font-semibold">Choose an item</h3>
                   <p className="text-xs muted">
-                    Type a SKU or an item name — the list narrows as you type.
+                    Double-click to add it and keep going. The window stays open.
                   </p>
                 </div>
                 <button
                   type="button"
                   className="btn btn-secondary btn-sm"
-                  onClick={() => setPickerFor(null)}
+                  onClick={() => setPickerOpen(false)}
                 >
                   Close
                 </button>
@@ -488,18 +551,18 @@ export function AdjustmentForm({
                   // Enter would otherwise submit the adjustment behind this.
                   if (event.key === "Enter") {
                     event.preventDefault();
-                    if (picked.length > 0) {
-                      chooseFor(pickerFor, picked[0]);
-                      setPickerFor(null);
-                    }
+                    if (picked.length > 0) addItem(picked[0]);
                   }
-                  if (event.key === "Escape") setPickerFor(null);
+                  if (event.key === "Escape") setPickerOpen(false);
                 }}
               />
+              {flash ? (
+                <p className="text-xs mt-2" style={{ color: "var(--color-brand-600)" }}>
+                  {flash}
+                </p>
+              ) : null}
             </div>
 
-            {/* Double-clicking a row takes it straight away, so text selection
-                would only get in the way here. */}
             <div
               className="table-scroll"
               style={{ overflowY: "auto", userSelect: "none" }}
@@ -516,54 +579,54 @@ export function AdjustmentForm({
                     </tr>
                   </thead>
                   <tbody>
-                    {picked.map((option) => (
-                      <tr
-                        key={option.id}
-                        onDoubleClick={() => {
-                          chooseFor(pickerFor, option);
-                          setPickerFor(null);
-                        }}
-                        style={{ cursor: "pointer" }}
-                      >
-                        <td>
-                          <input
-                            type="checkbox"
-                            className="h-4 w-4 accent-[var(--color-brand-600)]"
-                            aria-label={`Select ${option.name}`}
-                            checked={ticked.includes(option.id)}
-                            onChange={(event) => {
-                              // Read it now: by the time the updater runs,
-                              // React has let go of the event.
-                              const on = event.currentTarget.checked;
-                              setTicked((ids) =>
-                                on
-                                  ? [...ids, option.id]
-                                  : ids.filter((id) => id !== option.id),
-                              );
-                            }}
-                          />
-                        </td>
-                        <td className="text-xs tabular-nums muted">
-                          {option.sku ?? "—"}
-                        </td>
-                        <td className="text-sm">{option.name}</td>
-                        <td className="text-right tabular-nums text-sm">
-                          {Number(option.quantity_on_hand)} {option.unit_of_measure}
-                        </td>
-                        <td className="text-right">
-                          <button
-                            type="button"
-                            className="btn btn-primary btn-sm"
-                            onClick={() => {
-                              chooseFor(pickerFor, option);
-                              setPickerFor(null);
-                            }}
-                          >
-                            Choose
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
+                    {picked.map((option) => {
+                      const already = onSheet.has(option.id);
+                      return (
+                        <tr
+                          key={option.id}
+                          onDoubleClick={() => addItem(option)}
+                          style={{ cursor: "pointer" }}
+                        >
+                          <td>
+                            <input
+                              type="checkbox"
+                              className="h-4 w-4 accent-[var(--color-brand-600)]"
+                              aria-label={`Select ${option.name}`}
+                              checked={ticked.includes(option.id)}
+                              onChange={(event) => {
+                                const on = event.currentTarget.checked;
+                                setTicked((ids) =>
+                                  on
+                                    ? [...ids, option.id]
+                                    : ids.filter((id) => id !== option.id),
+                                );
+                              }}
+                            />
+                          </td>
+                          <td className="text-xs tabular-nums muted">
+                            {option.sku ?? "—"}
+                          </td>
+                          <td className="text-sm">
+                            {option.name}
+                            {already ? (
+                              <span className="badge ml-2">on the sheet</span>
+                            ) : null}
+                          </td>
+                          <td className="text-right tabular-nums text-sm">
+                            {Number(option.quantity_on_hand)} {option.unit_of_measure}
+                          </td>
+                          <td className="text-right">
+                            <button
+                              type="button"
+                              className="btn btn-primary btn-sm"
+                              onClick={() => addItem(option)}
+                            >
+                              Add
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               ) : (
@@ -581,14 +644,14 @@ export function AdjustmentForm({
                 type="button"
                 className="btn btn-primary"
                 disabled={ticked.length === 0}
-                onClick={() => addTicked()}
+                onClick={addTicked}
               >
                 Add and close
                 {ticked.length > 0 ? ` (${ticked.length})` : ""}
               </button>
               <p className="text-xs muted">
-                Tick several to add them all, or double-click a row to take just
-                that one.
+                Tick several to add them together, or double-click rows to add
+                them one at a time without leaving.
               </p>
             </div>
           </div>
