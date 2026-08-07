@@ -103,12 +103,19 @@ export function isPenaltyDue(billingReceivedOn: string, asOf = new Date()) {
 /**
  * Building-level reconciliation (spec 6): what the provider charged for versus
  * what the sub-meters account for. The gap is system loss or unbilled usage.
+ *
+ * Signed so that a loss is negative. When the provider billed for more than
+ * the meters caught, the difference is absorbed and never recovered from
+ * anyone -- money out, so it reads below zero. When the meters read higher,
+ * tenants were charged for more than the building was billed, which is money
+ * in. Every screen that shows this figure follows the same rule, so a minus
+ * sign always means the same thing.
  */
 export function reconcile(
   providerConsumption: number,
   tenantConsumptionTotal: number,
 ) {
-  const difference = providerConsumption - tenantConsumptionTotal;
+  const difference = tenantConsumptionTotal - providerConsumption;
   const percentage =
     providerConsumption > 0 ? (difference / providerConsumption) * 100 : 0;
   return {

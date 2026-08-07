@@ -191,9 +191,10 @@ export function ProviderBillForm({
   const unit = period.utility === "water" ? "cu.m" : "kWh";
 
   // What the sub-metered consumption is worth at the derived rate, and the gap
-  // against what the provider actually charged.
+  // against what the provider actually charged. Signed the same way as
+  // reconcile(): negative is money the company absorbs, positive is money in.
   const recovered = round2(tenantConsumption * rate);
-  const shortfall = round2((Number(amount) || 0) - recovered);
+  const shortfall = round2(recovered - (Number(amount) || 0));
 
   return (
     <form action={formAction} className="grid gap-4 sm:grid-cols-4">
@@ -309,9 +310,9 @@ export function ProviderBillForm({
               </tr>
               <tr>
                 <td className="font-semibold">
-                  {shortfall >= 0 ? "Unrecovered — system loss and common areas" : "Over-recovered"}
+                  {shortfall <= 0 ? "Unrecovered — system loss and common areas" : "Over-recovered"}
                   <p className="text-xs muted">
-                    {shortfall >= 0
+                    {shortfall <= 0
                       ? "Absorbed by the company unless it is billed some other way."
                       : "Tenants were charged more than the provider billed. Check the readings."}
                   </p>

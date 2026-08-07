@@ -313,6 +313,8 @@ export default async function DashboardPage({
         periodLabel: formatDate(period.period_start),
         monthLabel: new Date(period.period_start + "T00:00:00").toLocaleDateString("en-PH", { month: "short" }),
         utility: period.utility,
+        // reconcile() is already signed loss-negative, so the bar hangs the
+        // right way without help.
         unbilledPct: check.percentage,
         unbilledUnits: check.difference,
         unit: period.utility === "water" ? "cu.m" : "kWh",
@@ -682,7 +684,9 @@ export default async function DashboardPage({
                       <th>Period</th>
                       <th>Utility</th>
                       <th className="text-right">Rate</th>
-                      <th className="text-right">Unbilled</th>
+                      {/* "Unbilled 2340" read as a quantity; now that a loss
+                          is negative, the column is a variance, not a total. */}
+                      <th className="text-right">Recovery</th>
                     </tr>
                   </thead>
                   <tbody>

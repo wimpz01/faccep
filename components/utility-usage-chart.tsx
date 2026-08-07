@@ -8,7 +8,7 @@ export type UtilityUsagePoint = {
   periodLabel: string;
   monthLabel: string;
   utility: string;
-  /** Provider consumption less what the sub-meters account for. */
+  /** Signed recovery: negative is consumption lost, positive is over-recorded. */
   unbilledUnits: number;
   unbilledPct: number;
   unit: string;
@@ -22,9 +22,10 @@ export type UtilityUsagePoint = {
  * rather than a shared axis — each keeps its own units, which is what the
  * meter reader and the provider's bill are actually denominated in.
  *
- * The measure is signed and the zero line is the point of the chart: above it
- * the building drew more than the sub-meters recorded and the difference is
- * absorbed; below it the sub-meters read higher than the provider billed.
+ * The measure is signed and the zero line is the point of the chart. Below it
+ * the building drew more than the sub-meters recorded, so the difference is
+ * absorbed and never billed to anyone -- a loss, which is why it hangs
+ * downward. Above it the sub-meters read higher than the provider billed.
  */
 export function UtilityUsageChart({
   points,
@@ -70,7 +71,7 @@ export function UtilityUsageChart({
               background: "var(--viz-loss)",
             }}
           />
-          Unrecovered — the building used more than the meters recorded
+          Unrecovered — the building used more than the meters recorded, so it’s a loss (below the line)
         </span>
         <span className="flex items-center gap-1.5">
           <span
@@ -82,7 +83,7 @@ export function UtilityUsageChart({
               background: "var(--viz-over)",
             }}
           />
-          Over-recorded — the meters read higher than the provider billed
+          Over-recorded — the meters read higher than the provider billed, so it’s a gain (above the line)
         </span>
       </div>
 
@@ -202,7 +203,8 @@ function UtilityBars({
           const value = row?.unbilledUnits ?? 0;
           const top = value >= 0 ? y(value) : zeroY;
           const barHeight = row ? Math.max(2, Math.abs(zeroY - y(value))) : 0;
-          const isOver = value < 0;
+          // Below the line is consumption lost, above it is over-recorded.
+          const isOver = value > 0;
           return (
             <g key={slotItem.key}>
               {row ? (

@@ -62,8 +62,8 @@ export default async function UtilitiesReport({
       tenantTotal,
       rate,
       check,
-      // The unbilled consumption valued at the period's own rate.
-      lossValue: check.difference * rate,
+      // The variance valued at the period's own rate. Negative is absorbed.
+      recoveryValue: check.difference * rate,
     };
   });
 
@@ -72,7 +72,7 @@ export default async function UtilitiesReport({
     0,
   );
   const totalBilled = rows.reduce((sum, row) => sum + row.tenantTotal * row.rate, 0);
-  const totalLoss = rows.reduce((sum, row) => sum + row.lossValue, 0);
+  const totalRecovery = rows.reduce((sum, row) => sum + row.recoveryValue, 0);
 
   return (
     <ReportShell
@@ -94,9 +94,9 @@ export default async function UtilitiesReport({
           hint="At the derived rate"
         />
         <StatTile
-          label="Unrecovered"
-          value={money(totalLoss)}
-          hint="System loss and common areas"
+          label="Net recovery"
+          value={money(totalRecovery)}
+          hint="Negative is system loss and common areas"
         />
       </div>
 
@@ -147,7 +147,7 @@ export default async function UtilitiesReport({
                         {row.check.percentage}%
                       </td>
                       <td className="text-right tabular-nums">
-                        {money(row.lossValue)}
+                        {money(row.recoveryValue)}
                       </td>
                     </tr>
                   );
