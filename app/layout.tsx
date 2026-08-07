@@ -4,10 +4,10 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: {
-    default: "Faccep",
-    template: "%s · Faccep",
+    default: "Night Rider",
+    template: "%s · Night Rider",
   },
-  description: "Property management system for Faccep commercial leasing.",
+  description: "Property management system for Night Rider commercial leasing.",
 };
 
 export default function RootLayout({

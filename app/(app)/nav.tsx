@@ -245,7 +245,7 @@ export function AppNav({
         >
           {open ? "Close" : "Menu"}
         </button>
-        <span className="font-bold tracking-tight">Faccep</span>
+        <span className="font-bold tracking-tight">Night Rider</span>
         <form action={signOut}>
           <button type="submit" className="btn btn-secondary btn-sm">
             Sign out
@@ -265,10 +265,10 @@ export function AppNav({
             className="h-9 w-9 rounded-lg bg-brand-600 text-white grid place-items-center font-bold"
             style={{ letterSpacing: "-0.04em" }}
           >
-            F
+            NR
           </div>
           <div>
-            <p className="font-bold leading-tight tracking-tight">Faccep</p>
+            <p className="font-bold leading-tight tracking-tight">Night Rider</p>
             <p className="text-[0.7rem] muted leading-tight">
               Property Management
             </p>

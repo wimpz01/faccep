@@ -19,10 +19,10 @@ export default async function LoginPage({
             className="h-11 w-11 rounded-xl bg-brand-600 text-white grid place-items-center text-xl font-bold"
             style={{ letterSpacing: "-0.04em" }}
           >
-            F
+            NR
           </div>
           <div>
-            <h1 className="text-lg font-bold leading-tight">Faccep</h1>
+            <h1 className="text-lg font-bold leading-tight">Night Rider</h1>
             <p className="text-xs muted">Property Management System</p>
           </div>
         </div>

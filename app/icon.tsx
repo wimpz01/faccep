@@ -15,13 +15,14 @@ export default function Icon() {
           justifyContent: "center",
           background: "#4f46cf",
           color: "#ffffff",
-          fontSize: 22,
+          // Two letters in 32px, so smaller and tighter than the single F was.
+          fontSize: 15,
           fontWeight: 700,
           borderRadius: 7,
-          letterSpacing: "-0.04em",
+          letterSpacing: "-0.06em",
         }}
       >
-        F
+        NR
       </div>
     ),
     size,
