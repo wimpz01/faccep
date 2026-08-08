@@ -185,3 +185,66 @@ export function monthLabel(periodStart: string) {
     year: "numeric",
   });
 }
+
+/**
+ * The rent for every year of a contract, worked out rather than stored.
+ *
+ * Base rent, rate and start date already determine each year's figure, and
+ * rentForPeriod() is what billing charges from -- so the schedule is derived
+ * from the same inputs by the same rule. A stored copy could disagree with
+ * an invoice; this cannot.
+ */
+export type RentStep = {
+  /** The day this rent takes effect: an anniversary of the contract start. */
+  effectiveDate: string;
+  yearIndex: number;
+  previousRent: number | null;
+  escalationPercent: number | null;
+  rent: number;
+};
+
+export function rentSchedule(
+  baseRent: number,
+  escalationRatePercent: number,
+  contractStart: string,
+  contractEnd: string,
+): RentStep[] {
+  const start = contractStart.slice(0, 10);
+  const end = contractEnd.slice(0, 10);
+  const [startYear, startMonth, startDay] = start.split("-").map(Number);
+
+  const steps: RentStep[] = [];
+  for (let index = 0; index < 30; index += 1) {
+    const date = new Date(startYear + index, startMonth - 1, startDay);
+    const iso = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+    // The step that starts after the contract ends never happens.
+    if (index > 0 && iso > end) break;
+
+    const rent = rentForPeriod(baseRent, escalationRatePercent, start, iso);
+    steps.push({
+      effectiveDate: iso,
+      yearIndex: index,
+      previousRent: index === 0 ? null : steps[index - 1].rent,
+      escalationPercent: index === 0 ? null : escalationRatePercent,
+      rent,
+    });
+  }
+  return steps;
+}
+
+/** The next date the rent goes up, or null when it never does again. */
+export function nextEscalation(
+  baseRent: number,
+  escalationRatePercent: number,
+  contractStart: string,
+  contractEnd: string,
+  asOf: string,
+): RentStep | null {
+  if (escalationRatePercent <= 0) return null;
+  const today = asOf.slice(0, 10);
+  return (
+    rentSchedule(baseRent, escalationRatePercent, contractStart, contractEnd).find(
+      (step) => step.yearIndex > 0 && step.effectiveDate > today,
+    ) ?? null
+  );
+}

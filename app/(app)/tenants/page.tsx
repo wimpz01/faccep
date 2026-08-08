@@ -3,6 +3,7 @@ import Link from "next/link";
 
 import { Card, PageHeader } from "@/components/ui";
 import { requirePermission } from "@/lib/auth";
+import { rentForPeriod } from "@/lib/billing";
 import { MODULE, can } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
 
@@ -22,8 +23,10 @@ type TenantRow = {
   contracts: {
     id: string;
     status: string;
+    start_date: string;
     end_date: string;
     monthly_rent: string;
+    escalation_rate: string;
   }[];
 };
 
@@ -37,11 +40,12 @@ export default async function TenantsPage({
   const companyId = context.activeCompany!.companyId;
   const canEdit = can(context.permissions, MODULE.tenants, "edit");
 
+  const today = new Date().toISOString().slice(0, 10);
   const supabase = await createClient();
   const { data: tenants } = await supabase
     .from("tenants")
     .select(
-      "id, company_name, contact_person, mobile_number, is_vatable, status, contracts(id, status, end_date, monthly_rent)",
+      "id, company_name, contact_person, mobile_number, is_vatable, status, contracts(id, status, start_date, end_date, monthly_rent, escalation_rate)",
     )
     .eq("company_id", companyId)
     .order("company_name")
@@ -93,7 +97,18 @@ export default async function TenantsPage({
             mobile_number: tenant.mobile_number,
             is_vatable: tenant.is_vatable,
             status: tenant.status,
-            monthly_rent: active ? Number(active.monthly_rent) : null,
+            // The rent applying today, not the rent the contract opened at.
+            // Same function billing charges from, so the two cannot disagree.
+            monthly_rent: active
+              ? rentForPeriod(
+                  Number(active.monthly_rent),
+                  Number(active.escalation_rate),
+                  active.start_date,
+                  today,
+                )
+              : null,
+            base_rent: active ? Number(active.monthly_rent) : null,
+            contract_id: active ? active.id : null,
             contract_ends: active ? active.end_date : null,
           };
         })}

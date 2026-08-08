@@ -14,6 +14,8 @@ export type TenantListRow = {
   is_vatable: boolean;
   status: string;
   monthly_rent: number | null;
+  base_rent: number | null;
+  contract_id: string | null;
   contract_ends: string | null;
 };
 
@@ -110,7 +112,7 @@ export function TenantList({ rows }: { rows: TenantListRow[] }) {
                   <th>Contact</th>
                   <th>VAT</th>
                   <th>Status</th>
-                  <th className="text-right">Monthly rent</th>
+                  <th className="text-right">Current monthly rent</th>
                   <th>Contract ends</th>
                 </tr>
               </thead>
@@ -148,6 +150,15 @@ export function TenantList({ rows }: { rows: TenantListRow[] }) {
                       {tenant.monthly_rent === null
                         ? "—"
                         : money(tenant.monthly_rent)}
+                      {/* Only worth saying once the rent has actually moved
+                          off what the contract opened at. */}
+                      {tenant.base_rent !== null &&
+                      tenant.monthly_rent !== null &&
+                      tenant.base_rent !== tenant.monthly_rent ? (
+                        <p className="text-xs muted">
+                          from {money(tenant.base_rent)}
+                        </p>
+                      ) : null}
                     </td>
                     <td className="text-xs">
                       {tenant.contract_ends

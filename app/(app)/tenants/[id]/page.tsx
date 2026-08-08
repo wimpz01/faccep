@@ -2,14 +2,16 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
-import { Card, EmptyState, PageHeader } from "@/components/ui";
+import { Card, EmptyState, PageHeader, StatTile } from "@/components/ui";
 import { requirePermission } from "@/lib/auth";
 import { escalatedAmount, formatDate, money, monthsUntil } from "@/lib/format";
+import { nextEscalation, rentForPeriod } from "@/lib/billing";
 import { MODULE, can } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
 
 import { createContract, updateContract } from "@/app/(app)/contracts/actions";
 import { ContractForm } from "@/app/(app)/contracts/contract-form";
+import { FUND_STATUS } from "@/app/(app)/contracts/constants";
 import { loadContractOptions } from "@/app/(app)/contracts/data";
 
 import { deleteTenant, setTenantStatus, updateTenant } from "../actions";
@@ -142,6 +144,51 @@ export default async function TenantDetailPage({
     all.find((row) => row.status === "draft") ??
     null;
 
+  /*
+   * What the contract is actually worth today: the rent that applies now
+   * rather than the one it opened at, and what is left of the money taken at
+   * signing. The rent comes from the same function billing charges from, so
+   * the figure here and the figure on the invoice cannot drift apart.
+   */
+  const today = new Date().toISOString().slice(0, 10);
+  const currentRent = current
+    ? rentForPeriod(
+        Number(current.monthly_rent),
+        Number(current.escalation_rate),
+        current.start_date,
+        today,
+      )
+    : null;
+  const nextStep = current
+    ? nextEscalation(
+        Number(current.monthly_rent),
+        Number(current.escalation_rate),
+        current.start_date,
+        current.end_date,
+        today,
+      )
+    : null;
+
+  const { data: funds } = current
+    ? await supabase
+        .from("contract_fund_status")
+        .select(
+          `deposit_taken, deposit_drawn, deposit_remaining, deposit_status,
+           advance_taken, advance_drawn, advance_remaining, advance_status`,
+        )
+        .eq("contract_id", current.id)
+        .maybeSingle<{
+          deposit_taken: string;
+          deposit_drawn: string;
+          deposit_remaining: string;
+          deposit_status: string;
+          advance_taken: string;
+          advance_drawn: string;
+          advance_remaining: string;
+          advance_status: string;
+        }>()
+    : { data: null };
+
   const units = (current?.contract_units ?? [])
     .map((link) => link.units)
     .filter((unit): unit is NonNullable<typeof unit> => Boolean(unit));
@@ -196,6 +243,60 @@ export default async function TenantDetailPage({
           </div>
         }
       />
+
+      {/* The four questions asked most about a tenant, answered before any
+          scrolling: what they are on, what they pay now, and what of their
+          money we still hold. */}
+      {current ? (
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-6">
+          <StatTile
+            label="Contract"
+            value={current.contract_no}
+            hint={`${formatDate(current.start_date)} → ${formatDate(current.end_date)} · ${current.status}`}
+            href={`/contracts/${current.id}`}
+          />
+          <StatTile
+            label="Current monthly rent"
+            value={money(currentRent ?? 0)}
+            tone="money"
+            hint={
+              Number(current.escalation_rate) > 0
+                ? `From ${money(current.monthly_rent)} · ${Number(current.escalation_rate)}% a year${
+                    nextStep
+                      ? ` · next ${formatDate(nextStep.effectiveDate)}`
+                      : " · no more rises"
+                  }`
+                : "No escalation on this contract"
+            }
+          />
+          <StatTile
+            label="Security deposit"
+            value={money(funds?.deposit_remaining ?? current.security_deposit)}
+            hint={
+              funds
+                ? `${FUND_STATUS[funds.deposit_status] ?? funds.deposit_status}${
+                    Number(funds.deposit_drawn) > 0
+                      ? ` · ${money(funds.deposit_drawn)} of ${money(funds.deposit_taken)} drawn`
+                      : ` · ${money(funds.deposit_taken)} taken at signing`
+                  }`
+                : "Held"
+            }
+          />
+          <StatTile
+            label="Advance / prepayment"
+            value={money(funds?.advance_remaining ?? current.advance_payment)}
+            hint={
+              funds
+                ? `${FUND_STATUS[funds.advance_status] ?? funds.advance_status}${
+                    Number(funds.advance_drawn) > 0
+                      ? ` · ${money(funds.advance_drawn)} of ${money(funds.advance_taken)} used`
+                      : ` · ${money(funds.advance_taken)} taken at signing`
+                  }`
+                : "Held"
+            }
+          />
+        </div>
+      ) : null}
 
       {tenant.status === "blacklisted" ? (
         <div className="card mb-6">
