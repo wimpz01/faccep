@@ -773,3 +773,95 @@ export async function updateItemStockAccount(
   revalidatePath("/inventory/accounts");
   return { success: "Account saved." };
 }
+
+/**
+ * Changes an item's own setup.
+ *
+ * Everything here describes the item rather than its stock: what it is called,
+ * how it is counted, when to reorder, and which accounts it belongs to. What
+ * is on hand is never among them -- that is the ledger's answer, and typing
+ * over it would make the two disagree.
+ */
+const updateItemSchema = z.object({
+  name: z.string().trim().min(2, "Item name is required."),
+  category_id: z.string().uuid().nullish().or(z.literal("")),
+  unit_of_measure: z.string().trim().min(1, "Unit of measure is required."),
+  reorder_level: z.coerce.number().min(0, "Reorder level cannot be negative."),
+  unit_cost: z.coerce.number().min(0, "Unit cost cannot be negative."),
+  inventory_account_id: z.string().uuid().nullish().or(z.literal("")),
+  adjustment_account_id: z.string().uuid().nullish().or(z.literal("")),
+  is_active: z.coerce.boolean(),
+});
+
+export async function updateItem(
+  _prevState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  let companyId: string;
+  try {
+    const context = await assertPermission(MODULE.inventoryItems, "edit");
+    companyId = context.activeCompany!.companyId;
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+
+  const id = String(formData.get("item_id") ?? "");
+  if (!id) return { error: "Item not found." };
+
+  const parsed = updateItemSchema.safeParse({
+    name: formData.get("name"),
+    category_id: formData.get("category_id"),
+    unit_of_measure: formData.get("unit_of_measure") || "pc",
+    reorder_level: formData.get("reorder_level") || 0,
+    unit_cost: formData.get("unit_cost") || 0,
+    inventory_account_id: formData.get("inventory_account_id"),
+    adjustment_account_id: formData.get("adjustment_account_id"),
+    is_active: formData.get("is_active") === "on",
+  });
+  if (!parsed.success) return { error: parsed.error.issues[0].message };
+
+  const supabase = await createClient();
+  const { data: before } = await supabase
+    .from("inventory_items")
+    .select("name, unit_of_measure, unit_cost, reorder_level, is_active")
+    .eq("id", id)
+    .eq("company_id", companyId)
+    .maybeSingle();
+
+  if (!before) return { error: "Item not found." };
+
+  const { error } = await supabase
+    .from("inventory_items")
+    .update({
+      ...parsed.data,
+      category_id: parsed.data.category_id || null,
+      // Blank means fall back to the company's account.
+      inventory_account_id: parsed.data.inventory_account_id || null,
+      adjustment_account_id: parsed.data.adjustment_account_id || null,
+    })
+    .eq("id", id)
+    .eq("company_id", companyId);
+
+  if (error) {
+    return {
+      error:
+        error.code === "23505"
+          ? "Another item already has that name."
+          : error.message,
+    };
+  }
+
+  await logAudit({
+    action: "update",
+    moduleKey: MODULE.inventoryItems,
+    entityTable: "inventory_items",
+    entityId: id,
+    summary: `Updated ${parsed.data.name}.`,
+    before,
+    after: parsed.data,
+  });
+
+  revalidatePath("/inventory");
+  revalidatePath(`/inventory/${id}`);
+  return { success: "Saved." };
+}
