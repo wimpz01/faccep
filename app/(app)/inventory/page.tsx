@@ -1,11 +1,13 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 
-import { Card, EmptyState, FilterNote, PageHeader, StatTile } from "@/components/ui";
+import { FilterNote, PageHeader, StatTile } from "@/components/ui";
 import { requirePermission } from "@/lib/auth";
 import { money } from "@/lib/format";
 import { MODULE, can } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
+
+import { ItemList } from "./item-list";
 
 export const metadata: Metadata = { title: "Inventory" };
 
@@ -36,18 +38,34 @@ export default async function InventoryPage({
   const context = await requirePermission(MODULE.inventoryItems, "view");
   const companyId = context.activeCompany!.companyId;
   const canEditItems = can(context.permissions, MODULE.inventoryItems, "edit");
+  // What stock is worth is a money question, so it stays with the people who
+  // are trusted with money questions. Storekeepers still see quantities.
+  const canSeeValue = Boolean(
+    context.isSuperAdmin || context.activeCompany?.isCompanyAdmin,
+  );
 
   const supabase = await createClient();
-  const { data: items } = await supabase
-    .from("inventory_items")
-    .select(
-      "id, name, sku, unit_of_measure, reorder_level, unit_cost, quantity_on_hand, inventory_categories(name)",
-    )
-    .eq("company_id", companyId)
-    .eq("is_active", true)
-    .order("name")
-    .returns<ItemRow[]>();
+  const [{ data: items }, { data: costs }] = await Promise.all([
+    supabase
+      .from("inventory_items")
+      .select(
+        "id, name, sku, unit_of_measure, reorder_level, unit_cost, quantity_on_hand, inventory_categories(name)",
+      )
+      .eq("company_id", companyId)
+      .eq("is_active", true)
+      .order("name")
+      .returns<ItemRow[]>(),
+    // Valued at what was actually paid, not at whatever unit cost was typed.
+    supabase
+      .from("inventory_item_costs")
+      .select("item_id, average_cost, stock_value")
+      .eq("company_id", companyId)
+      .returns<
+        { item_id: string; average_cost: string; stock_value: string }[]
+      >(),
+  ]);
 
+  const costBy = new Map((costs ?? []).map((row) => [row.item_id, row]));
   const rows = items ?? [];
   const belowReorder = rows.filter(
     (item) =>
@@ -60,7 +78,7 @@ export default async function InventoryPage({
     view === "reorder" ? "items at or below their reorder level" : null;
 
   const stockValue = rows.reduce(
-    (sum, item) => sum + Number(item.quantity_on_hand) * Number(item.unit_cost),
+    (sum, item) => sum + Number(costBy.get(item.id)?.stock_value ?? 0),
     0,
   );
 
@@ -90,13 +108,15 @@ export default async function InventoryPage({
           hint="Active stock items"
           href="/inventory"
         />
-        <StatTile
-          label="Stock value"
-          value={money(stockValue)}
-          hint="On hand at unit cost"
-          tone="money"
-          href="/inventory"
-        />
+        {canSeeValue ? (
+          <StatTile
+            label="Stock value"
+            value={money(stockValue)}
+            hint="On hand at average cost paid"
+            tone="money"
+            href="/inventory"
+          />
+        ) : null}
         <StatTile
           label="At or below reorder"
           value={belowReorder.length}
@@ -113,75 +133,21 @@ export default async function InventoryPage({
         />
       ) : null}
 
-      <Card
-        title="Item list"
-        description="Everything on file. Open an item to see what it cost, who supplied it and where it went."
-        bodyClassName=""
-      >
-        {shown.length > 0 ? (
-          <div className="table-scroll">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Item</th>
-                  <th>Category</th>
-                  <th className="text-right">On hand</th>
-                  <th className="text-right">Reorder at</th>
-                  <th className="text-right">Unit cost</th>
-                  <th className="text-right">Value</th>
-                </tr>
-              </thead>
-              <tbody>
-                {shown.map((item) => {
-                  const low =
-                    Number(item.reorder_level) > 0 &&
-                    Number(item.quantity_on_hand) <= Number(item.reorder_level);
-                  return (
-                    <tr key={item.id}>
-                      <td>
-                        <Link
-                          href={`/inventory/${item.id}`}
-                          className="font-medium text-sm"
-                          style={{ color: "var(--color-brand-600)" }}
-                        >
-                          {item.name}
-                        </Link>
-                        {item.sku ? (
-                          <p className="text-xs muted tabular-nums">{item.sku}</p>
-                        ) : null}
-                      </td>
-                      <td className="text-xs">
-                        {item.inventory_categories?.name ?? "—"}
-                      </td>
-                      <td
-                        className="text-right tabular-nums"
-                        style={low ? { color: "var(--danger)" } : undefined}
-                      >
-                        {Number(item.quantity_on_hand)} {item.unit_of_measure}
-                      </td>
-                      <td className="text-right tabular-nums">
-                        {Number(item.reorder_level) || "—"}
-                      </td>
-                      <td className="text-right tabular-nums">
-                        {money(item.unit_cost)}
-                      </td>
-                      <td className="text-right tabular-nums">
-                        {money(
-                          Number(item.quantity_on_hand) * Number(item.unit_cost),
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <EmptyState>
-            No stock items yet. Use <strong>Add new item</strong> above.
-          </EmptyState>
-        )}
-      </Card>
+      <ItemList
+        showValue={canSeeValue}
+        title={`${shown.length} item${shown.length === 1 ? "" : "s"}`}
+        rows={shown.map((item) => ({
+          id: item.id,
+          name: item.name,
+          sku: item.sku,
+          unit_of_measure: item.unit_of_measure,
+          reorder_level: Number(item.reorder_level),
+          unit_cost: Number(costBy.get(item.id)?.average_cost ?? item.unit_cost),
+          quantity_on_hand: Number(item.quantity_on_hand),
+          category: item.inventory_categories?.name ?? "—",
+        }))}
+      />
     </>
   );
 }
+
