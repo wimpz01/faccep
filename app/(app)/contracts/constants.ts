@@ -26,3 +26,12 @@ export const CONTRACT_STATUS_BADGE: Record<string, string> = {
 export const BILLING_TYPE_LABELS: Record<string, string> = Object.fromEntries(
   BILLING_TYPES.map((type) => [type.value, type.label]),
 );
+
+/** How a deposit or advance reads once it has been drawn on. */
+export const FUND_STATUS: Record<string, string> = {
+  none: "None taken",
+  held: "Held",
+  partially_applied: "Partially applied",
+  fully_applied: "Fully applied",
+  refunded: "Refunded",
+};

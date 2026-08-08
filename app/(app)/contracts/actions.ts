@@ -515,3 +515,149 @@ export async function deleteContract(formData: FormData) {
 
   redirect("/contracts");
 }
+
+/**
+ * Draws on a deposit or an advance.
+ *
+ * The contract keeps saying what was taken at signing; this records what has
+ * since been done with it. The database refuses to give up more than is left,
+ * so the balance shown can never be argued with.
+ */
+const fundSchema = z.object({
+  contract_id: z.string().uuid("Contract not found."),
+  fund_kind: z.enum(["security_deposit", "advance_payment"]),
+  event: z.enum(["applied", "refunded", "forfeited"]),
+  amount: z.coerce.number().positive("Enter an amount above zero."),
+  applied_on: z.string().min(10, "Choose the date."),
+  note: z.string().trim().nullish().or(z.literal("")),
+});
+
+export async function applyContractFund(
+  _prevState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  let companyId: string;
+  let userId: string;
+  try {
+    const context = await assertPermission(MODULE.contracts, "edit");
+    companyId = context.activeCompany!.companyId;
+    userId = context.userId;
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+
+  const parsed = fundSchema.safeParse({
+    contract_id: formData.get("contract_id"),
+    fund_kind: formData.get("fund_kind"),
+    event: formData.get("event"),
+    amount: formData.get("amount"),
+    applied_on: formData.get("applied_on"),
+    note: formData.get("note"),
+  });
+  if (!parsed.success) return { error: parsed.error.issues[0].message };
+
+  const supabase = await createClient();
+  const { error } = await supabase.from("contract_fund_applications").insert({
+    company_id: companyId,
+    contract_id: parsed.data.contract_id,
+    fund_kind: parsed.data.fund_kind,
+    event: parsed.data.event,
+    amount: parsed.data.amount,
+    applied_on: parsed.data.applied_on,
+    note: parsed.data.note || null,
+    created_by: userId,
+  });
+
+  if (error) return { error: error.message };
+
+  await logAudit({
+    action: "update",
+    moduleKey: MODULE.contracts,
+    entityTable: "contract_fund_applications",
+    entityId: parsed.data.contract_id,
+    summary: `${parsed.data.event} ${parsed.data.amount.toFixed(2)} of the ${parsed.data.fund_kind.replace("_", " ")}.`,
+    after: parsed.data,
+  });
+
+  revalidatePath(`/contracts/${parsed.data.contract_id}`);
+  revalidatePath("/tenants");
+  return { success: "Recorded." };
+}
+
+/**
+ * Rules on a coming rent rise.
+ *
+ * Applying it charges the contract's rate from that anniversary; waiving it
+ * charges nothing for that year, and every later rise starts from the held
+ * figure -- the year given away is never charged afterwards. Either way the
+ * decision is recorded against the anniversary rather than written over the
+ * rent, so past invoices still add up and the reason survives.
+ */
+export async function decideEscalation(
+  _prevState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  let userId: string;
+  try {
+    const context = await assertPermission(MODULE.contracts, "approve");
+    userId = context.userId;
+  } catch {
+    return {
+      error:
+        "Holding or applying a rent rise needs the Approve permission on contracts.",
+    };
+  }
+
+  const id = String(formData.get("escalation_id") ?? "");
+  const decision = String(formData.get("decision") ?? "");
+  const reason = String(formData.get("reason") ?? "").trim();
+
+  if (!["applied", "waived", "pending"].includes(decision)) {
+    return { error: "Unknown decision." };
+  }
+  if (decision === "waived" && !reason) {
+    return { error: "Say why the rise is being held." };
+  }
+
+  const supabase = await createClient();
+  const { data: row } = await supabase
+    .from("contract_escalations")
+    .select("contract_id, effective_date, contracts(escalation_rate)")
+    .eq("id", id)
+    .maybeSingle<{
+      contract_id: string;
+      effective_date: string;
+      contracts: { escalation_rate: string } | null;
+    }>();
+
+  if (!row) return { error: "That escalation was not found." };
+
+  const { error } = await supabase
+    .from("contract_escalations")
+    .update({
+      decision,
+      // Waiving is nothing; applying is whatever the contract says.
+      rate_percent:
+        decision === "waived" ? 0 : Number(row.contracts?.escalation_rate ?? 0),
+      reason: reason || null,
+      decided_by: decision === "pending" ? null : userId,
+      decided_at: decision === "pending" ? null : new Date().toISOString(),
+    })
+    .eq("id", id);
+
+  if (error) return { error: error.message };
+
+  await logAudit({
+    action: "update",
+    moduleKey: MODULE.contracts,
+    entityTable: "contract_escalations",
+    entityId: id,
+    summary: `Rent rise of ${row.effective_date} ${decision}${reason ? ` — ${reason}` : ""}.`,
+    after: { decision, reason },
+  });
+
+  revalidatePath(`/contracts/${row.contract_id}`);
+  revalidatePath("/tenants");
+  revalidatePath("/dashboard");
+  return { success: decision === "waived" ? "Rise held." : "Rise applied." };
+}

@@ -9,6 +9,9 @@ import { createClient } from "@/lib/supabase/server";
 
 import { recordPayment } from "./actions";
 import { RecordPaymentForm, type OpenInvoice } from "./payment-forms";
+import { applyContractFund } from "@/app/(app)/contracts/actions";
+import { FundApplicationForm } from "@/app/(app)/contracts/fund-form";
+
 import { PaymentList } from "./payment-list";
 
 export const metadata: Metadata = { title: "Payments" };
@@ -29,9 +32,9 @@ type PaymentRow = {
 export default async function PaymentsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ add?: string }>;
+  searchParams: Promise<{ add?: string; fund?: string }>;
 }) {
-  const { add } = await searchParams;
+  const { add, fund } = await searchParams;
   const context = await requirePermission(MODULE.payments, "view");
   const companyId = context.activeCompany!.companyId;
   const canEdit = can(context.permissions, MODULE.payments, "edit");
@@ -76,6 +79,48 @@ export default async function PaymentsPage({
 
   const rows = payments ?? [];
   const adding = canEdit && add === "1";
+  const applyingFund = canEdit && fund === "1";
+
+  /*
+   * Contracts with money still held against them. Loaded only when the form
+   * is open, since most visits to this page are about ordinary payments.
+   */
+  const { data: fundRows } = applyingFund
+    ? await supabase
+        .from("contract_fund_status")
+        .select(
+          `contract_id, deposit_remaining, advance_remaining,
+           contracts(contract_no, status, tenants(company_name))`,
+        )
+        .eq("company_id", companyId)
+        .returns<
+          {
+            contract_id: string;
+            deposit_remaining: string;
+            advance_remaining: string;
+            contracts: {
+              contract_no: string;
+              status: string;
+              tenants: { company_name: string } | null;
+            } | null;
+          }[]
+        >()
+    : { data: null };
+
+  const fundContracts = (fundRows ?? [])
+    .filter(
+      (row) =>
+        row.contracts?.status === "active" &&
+        (Number(row.deposit_remaining) > 0 || Number(row.advance_remaining) > 0),
+    )
+    .map((row) => ({
+      id: row.contract_id,
+      contract_no: row.contracts?.contract_no ?? "",
+      tenant: row.contracts?.tenants?.company_name ?? "Unknown tenant",
+      depositRemaining: Number(row.deposit_remaining),
+      advanceRemaining: Number(row.advance_remaining),
+    }))
+    .sort((a, b) => a.tenant.localeCompare(b.tenant));
   const posted = rows.filter((row) => row.status === "posted");
   const thisMonth = new Date().toISOString().slice(0, 7);
   const collectedThisMonth = posted
@@ -92,6 +137,17 @@ export default async function PaymentsPage({
             <Link href="/payments/pdc" className="btn btn-secondary btn-sm">
               Postdated cheques
             </Link>
+            {canEdit ? (
+              applyingFund ? (
+                <Link href="/payments" className="btn btn-secondary btn-sm">
+                  Close
+                </Link>
+              ) : (
+                <Link href="/payments?fund=1" className="btn btn-secondary btn-sm">
+                  Apply advance / deposit
+                </Link>
+              )
+            ) : null}
             {canEdit ? (
               adding ? (
                 <Link href="/payments" className="btn btn-secondary btn-sm">
@@ -126,6 +182,20 @@ export default async function PaymentsPage({
           hint="Reversed with approval"
         />
       </div>
+
+      {applyingFund ? (
+        <div className="mb-6">
+          <Card
+            title="Apply an advance or deposit"
+            description="Money already held against a contract, set against a bill, refunded or forfeited. The contract keeps saying what was taken at signing."
+          >
+            <FundApplicationForm
+              action={applyContractFund}
+              contracts={fundContracts}
+            />
+          </Card>
+        </div>
+      ) : null}
 
       {adding ? (
         <div className="mb-6">
