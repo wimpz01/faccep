@@ -241,12 +241,23 @@ export async function generateInvoices(
     let order = 0;
 
     if (inclusions.has("rent")) {
-      const rent = rentForPeriod(
-        Number(contract.monthly_rent),
-        Number(contract.escalation_rate),
-        contract.start_date,
-        monthStart,
+      /*
+       * The rent comes from the database rather than being recomputed here,
+       * because an escalation can be waived and only the contract's own
+       * decisions know that. Falling back to the formula would quietly bill a
+       * rise somebody had agreed to hold.
+       */
+      const { data: decidedRent, error: rentError } = await supabase.rpc(
+        "contract_rent_on",
+        { p_contract: contract.id, p_on: monthStart },
       );
+      if (rentError) {
+        problems.push(
+          `${contract.tenants?.company_name ?? contract.id}: could not work out the rent — ${rentError.message}`,
+        );
+        continue;
+      }
+      const rent = Number(decidedRent ?? 0);
       lines.push({
         line_kind: "rent",
         description: `Monthly rent — ${monthLabel(monthStart)}`,

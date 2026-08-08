@@ -21,6 +21,14 @@ const DUE_SOON_DAYS = 2;
 /** Spec 3: six months before a contract ends, to trigger the renewal notice. */
 const RENEWAL_NOTICE_MONTHS = 6;
 const PDC_HORIZON_DAYS = 30;
+/**
+ * How far ahead a rent rise is worth flagging.
+ *
+ * Two months is enough notice to talk to a tenant and rule on it before the
+ * date arrives. After the fact, holding a rise means issuing a credit note
+ * rather than making a decision.
+ */
+const ESCALATION_NOTICE_DAYS = 60;
 
 export default async function DashboardPage({
   searchParams,
@@ -42,6 +50,11 @@ export default async function DashboardPage({
     .toISOString()
     .slice(0, 10);
   const pdcCutoff = new Date(Date.now() + PDC_HORIZON_DAYS * 86_400_000)
+    .toISOString()
+    .slice(0, 10);
+  const escalationHorizon = new Date(
+    Date.now() + ESCALATION_NOTICE_DAYS * 86_400_000,
+  )
     .toISOString()
     .slice(0, 10);
   const monthStart = `${today.slice(0, 7)}-01`;
@@ -69,6 +82,7 @@ export default async function DashboardPage({
     { data: paymentsThisMonth },
     { data: periods },
     { data: allCheques },
+    { data: risesDue },
   ] = await Promise.all([
     seeOccupancy
       ? supabase
@@ -194,6 +208,36 @@ export default async function DashboardPage({
             }[]
           >()
       : Promise.resolve({ data: null }),
+    /*
+     * Rent rises nobody has ruled on yet. They are worth surfacing before the
+     * date arrives: once an invoice has gone out at the higher figure, holding
+     * it is a credit note rather than a decision.
+     */
+    seeNotifications
+      ? supabase
+          .from("contract_escalations")
+          .select(
+            `id, effective_date, rate_percent, contract_id,
+             contracts(contract_no, status, tenants(company_name))`,
+          )
+          .eq("company_id", companyId)
+          .eq("decision", "pending")
+          .lte("effective_date", escalationHorizon)
+          .order("effective_date")
+          .returns<
+            {
+              id: string;
+              effective_date: string;
+              rate_percent: string;
+              contract_id: string;
+              contracts: {
+                contract_no: string;
+                status: string;
+                tenants: { company_name: string } | null;
+              } | null;
+            }[]
+          >()
+      : Promise.resolve({ data: null }),
   ]);
 
   // The cheque panel counts every live cheque, not just the imminent ones the
@@ -276,8 +320,17 @@ export default async function DashboardPage({
     0,
   );
 
+  // Only rises on live contracts are worth ruling on.
+  const escalationsDue = (risesDue ?? []).filter(
+    (row) => row.contracts?.status === "active",
+  );
+
   const notificationCount =
-    overdue.length + dueSoon.length + renewals.length + (cheques?.length ?? 0);
+    overdue.length +
+    dueSoon.length +
+    renewals.length +
+    escalationsDue.length +
+    (cheques?.length ?? 0);
 
   /**
    * The same reconciliation the table shows, shaped for the chart.
@@ -400,7 +453,7 @@ export default async function DashboardPage({
           <StatTile
             label="Needs attention"
             value={notificationCount}
-            hint="Overdue, due soon, renewals, cheques"
+            hint="Overdue, due soon, renewals, rent rises, cheques"
             href={
               showAttention ? "/dashboard" : "/dashboard?view=attention"
             }
@@ -495,6 +548,34 @@ export default async function DashboardPage({
                         </tr>
                       );
                     })}
+
+                    {/* A rise nobody has ruled on. Flagged before the date so
+                        holding it is still a decision rather than a credit
+                        note. */}
+                    {escalationsDue.map((rise) => (
+                      <tr key={`rise-${rise.id}`}>
+                        <td>
+                          <span className="badge">rent rise</span>
+                        </td>
+                        <td>
+                          <Link
+                            href={`/contracts/${rise.contract_id}`}
+                            style={{ color: "var(--color-brand-600)" }}
+                          >
+                            {rise.contracts?.contract_no}
+                          </Link>{" "}
+                          — {rise.contracts?.tenants?.company_name}
+                          <p className="text-xs muted">
+                            {Number(rise.rate_percent)}% due{" "}
+                            {formatDate(rise.effective_date)} · apply it or hold
+                            it
+                          </p>
+                        </td>
+                        <td className="text-right tabular-nums">
+                          <span className="muted text-xs">awaiting</span>
+                        </td>
+                      </tr>
+                    ))}
 
                     {chequesToCollect.map((cheque) => (
                       <tr key={`collect-${cheque.id}`}>

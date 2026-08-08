@@ -10,12 +10,14 @@ import { createClient } from "@/lib/supabase/server";
 
 import {
   activateContract,
+  decideEscalation,
   deleteContract,
   recordSignedCopy,
   terminateContract,
   updateContract,
 } from "../actions";
-import { CONTRACT_STATUS_BADGE } from "../constants";
+import { CONTRACT_STATUS_BADGE, FUND_STATUS } from "../constants";
+import { EscalationDecisionForm } from "../escalation-form";
 import { ContractForm } from "../contract-form";
 import { loadContractOptions } from "../data";
 import { ActivateForm, SignedCopyUploader, TerminateForm } from "./lifecycle";
@@ -85,6 +87,85 @@ export default async function ContractDetailPage({
 
   if (!contract || contract.company_id !== companyId) notFound();
 
+  /*
+   * The rent for every year of the term, and what remains of the money taken
+   * at signing. The schedule is computed from base rent, rate and start date
+   * -- the same inputs, by the same function, that billing charges from -- so
+   * it can never quote a figure an invoice would not.
+   */
+  const today = new Date().toISOString().slice(0, 10);
+
+  const { data: escalations } = await supabase
+    .from("contract_escalations")
+    .select("id, effective_date, decision, rate_percent, reason")
+    .eq("contract_id", id)
+    .order("effective_date")
+    .returns<
+      {
+        id: string;
+        effective_date: string;
+        decision: string;
+        rate_percent: string;
+        reason: string | null;
+      }[]
+    >();
+
+  // Rent is asked of the database at each step, because only it knows which
+  // rises were held. Working it out here would risk quoting a figure no
+  // invoice would ever charge.
+  const steps = await Promise.all(
+    [
+      { date: contract.start_date, escalation: null as (typeof escalations extends (infer T)[] | null ? T : never) | null },
+      ...(escalations ?? []).map((row) => ({ date: row.effective_date, escalation: row })),
+    ].map(async (step) => {
+      const { data } = await supabase.rpc("contract_rent_on", {
+        p_contract: id,
+        p_on: step.date,
+      });
+      return { ...step, rent: Number(data ?? 0) };
+    }),
+  );
+
+  const { data: rentNow } = await supabase.rpc("contract_rent_on", {
+    p_contract: id,
+    p_on: today,
+  });
+  const currentRent = Number(rentNow ?? contract.monthly_rent);
+
+  const { data: funds } = await supabase
+    .from("contract_fund_status")
+    .select(
+      `deposit_taken, deposit_drawn, deposit_remaining, deposit_status,
+       advance_taken, advance_drawn, advance_remaining, advance_status`,
+    )
+    .eq("contract_id", id)
+    .maybeSingle<{
+      deposit_taken: string;
+      deposit_drawn: string;
+      deposit_remaining: string;
+      deposit_status: string;
+      advance_taken: string;
+      advance_drawn: string;
+      advance_remaining: string;
+      advance_status: string;
+    }>();
+
+  const { data: drawdowns } = await supabase
+    .from("contract_fund_applications")
+    .select("id, fund_kind, event, applied_on, amount, note")
+    .eq("contract_id", id)
+    .order("applied_on", { ascending: false })
+    .returns<
+      {
+        id: string;
+        fund_kind: string;
+        event: string;
+        applied_on: string;
+        amount: string;
+        note: string | null;
+      }[]
+    >();
+
   const unitIds = (contract.contract_units ?? []).map((link) => link.unit_id);
   const { tenants, units } = canEdit
     ? await loadContractOptions(companyId, unitIds)
@@ -142,17 +223,20 @@ export default async function ContractDetailPage({
         <div className="card">
           <div className="card-body">
             <p className="text-[0.7rem] font-bold uppercase tracking-[0.06em] muted">
-              Monthly rent
+              Current monthly rent
             </p>
             <p
               className="text-2xl font-bold mt-1 tabular-nums"
               style={{ color: "var(--color-gold-500)" }}
             >
-              {money(contract.monthly_rent)}
+              {money(currentRent)}
             </p>
             <p className="text-xs muted mt-1">
-              Due day {contract.rent_due_day} · {Number(contract.escalation_rate)}%
-              escalation
+              {currentRent !== Number(contract.monthly_rent)
+                ? `From ${money(contract.monthly_rent)} · `
+                : ""}
+              Due day {contract.rent_due_day} ·{" "}
+              {Number(contract.escalation_rate)}% escalation
             </p>
           </div>
         </div>
@@ -162,10 +246,14 @@ export default async function ContractDetailPage({
               Deposit / advance
             </p>
             <p className="text-lg font-bold mt-1 tabular-nums">
-              {money(contract.security_deposit)}
+              {money(funds?.deposit_remaining ?? contract.security_deposit)}
             </p>
             <p className="text-xs muted">
-              Advance {money(contract.advance_payment)}
+              Advance {money(funds?.advance_remaining ?? contract.advance_payment)}
+              {funds &&
+              (Number(funds.deposit_drawn) > 0 || Number(funds.advance_drawn) > 0)
+                ? " — what is left"
+                : ""}
             </p>
           </div>
         </div>
@@ -182,6 +270,180 @@ export default async function ContractDetailPage({
             </p>
           </div>
         </div>
+      </div>
+
+      <div className="mb-6">
+        <Card
+          title="Rent schedule"
+          description="Worked out from the base rent, the escalation rate and the start date — the same three figures invoice generation charges from, so this is what will be billed."
+          bodyClassName=""
+        >
+          <div className="table-scroll">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Effective</th>
+                  <th>Contract year</th>
+                  <th className="text-right">Previous rent</th>
+                  <th className="text-right">Escalation</th>
+                  <th className="text-right">Monthly rent</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {steps.map((step, index) => {
+                  const applies =
+                    step.date <= today &&
+                    !steps.some(
+                      (later) => later.date <= today && later.date > step.date,
+                    );
+                  const previous = index === 0 ? null : steps[index - 1].rent;
+                  const held = step.escalation?.decision === "waived";
+                  return (
+                    <tr key={step.date}>
+                      <td className="text-sm">{formatDate(step.date)}</td>
+                      <td className="text-xs muted">Year {index + 1}</td>
+                      <td className="text-right tabular-nums text-sm">
+                        {previous === null ? "—" : money(previous)}
+                      </td>
+                      <td className="text-right tabular-nums text-sm">
+                        {!step.escalation
+                          ? "—"
+                          : held
+                            ? "held"
+                            : `${Number(contract.escalation_rate)}%`}
+                      </td>
+                      <td className="text-right tabular-nums font-medium">
+                        {money(step.rent)}
+                      </td>
+                      <td className="text-xs">
+                        {step.escalation?.decision === "pending" &&
+                        canApprove ? (
+                          <EscalationDecisionForm
+                            action={decideEscalation}
+                            escalationId={step.escalation.id}
+                          />
+                        ) : held ? (
+                          <>
+                            <span className="badge">held</span>
+                            {step.escalation?.reason ? (
+                              <p className="muted mt-1">
+                                {step.escalation.reason}
+                              </p>
+                            ) : null}
+                          </>
+                        ) : applies ? (
+                          <span className="badge badge-brand">applies now</span>
+                        ) : step.date > today ? (
+                          <span className="muted">
+                            {step.escalation?.decision === "pending"
+                              ? "awaiting a decision"
+                              : "upcoming"}
+                          </span>
+                        ) : (
+                          <span className="muted">past</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      </div>
+
+      <div className="mb-6">
+        <Card
+          title="Deposit and advance"
+          description="What was taken at signing, and what has become of it since. Applying or refunding is recorded under Billing → Payments, not here."
+          bodyClassName=""
+        >
+          <div className="table-scroll">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Fund</th>
+                  <th className="text-right">Taken at signing</th>
+                  <th className="text-right">Drawn</th>
+                  <th className="text-right">Remaining</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td className="text-sm">Security deposit</td>
+                  <td className="text-right tabular-nums text-sm">
+                    {money(funds?.deposit_taken ?? contract.security_deposit)}
+                  </td>
+                  <td className="text-right tabular-nums text-sm">
+                    {money(funds?.deposit_drawn ?? 0)}
+                  </td>
+                  <td className="text-right tabular-nums font-medium">
+                    {money(funds?.deposit_remaining ?? contract.security_deposit)}
+                  </td>
+                  <td className="text-xs">
+                    {FUND_STATUS[funds?.deposit_status ?? "held"] ?? "Held"}
+                  </td>
+                </tr>
+                <tr>
+                  <td className="text-sm">Advance / prepayment</td>
+                  <td className="text-right tabular-nums text-sm">
+                    {money(funds?.advance_taken ?? contract.advance_payment)}
+                  </td>
+                  <td className="text-right tabular-nums text-sm">
+                    {money(funds?.advance_drawn ?? 0)}
+                  </td>
+                  <td className="text-right tabular-nums font-medium">
+                    {money(funds?.advance_remaining ?? contract.advance_payment)}
+                  </td>
+                  <td className="text-xs">
+                    {FUND_STATUS[funds?.advance_status ?? "held"] ?? "Held"}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          {(drawdowns ?? []).length > 0 ? (
+            <div className="card-body" style={{ borderTop: "1px solid var(--border)" }}>
+              <p className="label mb-2">Drawdowns</p>
+              <div className="table-scroll">
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th>Date</th>
+                      <th>Fund</th>
+                      <th>What happened</th>
+                      <th className="text-right">Amount</th>
+                      <th>Note</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(drawdowns ?? []).map((row) => (
+                      <tr key={row.id}>
+                        <td className="text-xs">{formatDate(row.applied_on)}</td>
+                        <td className="text-xs">
+                          {row.fund_kind === "security_deposit"
+                            ? "Deposit"
+                            : "Advance"}
+                        </td>
+                        <td className="text-xs">
+                          <span className="badge">{row.event}</span>
+                        </td>
+                        <td className="text-right tabular-nums text-sm">
+                          {money(row.amount)}
+                        </td>
+                        <td className="text-xs muted">{row.note ?? "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : null}
+
+        </Card>
       </div>
 
       {canApprove && contract.status === "draft" ? (

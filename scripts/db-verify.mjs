@@ -1755,6 +1755,94 @@ async function main() {
    * matched no row and reported no error, so the request was marked approved
    * while the payment stayed posted.
    */
+  /**
+   * A deposit and an advance are real money, so what is left of each is
+   * derived from what has been drawn rather than typed, and the database
+   * refuses to give up more than was taken.
+   */
+  console.log("\nDeposit and advance drawdowns");
+
+  const fundContract = (
+    await db.query(`
+      insert into public.contracts
+        (company_id, tenant_id, contract_no, status, start_date, end_date,
+         term_years, monthly_rent, security_deposit, advance_payment,
+         escalation_rate)
+      values (${lit(alpha)}, ${lit(billTenant)}, ${lit(`${TEST_TAG}-FUND`)},
+              'active', '2026-01-01', '2027-12-31', 2, 20000, 40000, 20000, 5)
+      returning id;
+    `)
+  )[0].id;
+
+  const fundState = async () =>
+    (
+      await db.query(`
+        select deposit_remaining, deposit_status, advance_remaining, advance_status
+          from public.contract_fund_status where contract_id = ${lit(fundContract)};
+      `)
+    )[0];
+
+  check(
+    "an untouched deposit reads as held in full",
+    [Number((await fundState()).deposit_remaining), (await fundState()).deposit_status],
+    [40000, "held"],
+  );
+
+  await db.query(`
+    insert into public.contract_fund_applications
+      (company_id, contract_id, fund_kind, event, amount)
+    values (${lit(alpha)}, ${lit(fundContract)}, 'advance_payment', 'applied', 8000);
+  `);
+  check(
+    "drawing on an advance leaves the rest",
+    [Number((await fundState()).advance_remaining), (await fundState()).advance_status],
+    [12000, "partially_applied"],
+  );
+
+  await db.query(`
+    insert into public.contract_fund_applications
+      (company_id, contract_id, fund_kind, event, amount)
+    values (${lit(alpha)}, ${lit(fundContract)}, 'advance_payment', 'applied', 12000);
+  `);
+  check(
+    "using the last of it reads as fully applied",
+    [Number((await fundState()).advance_remaining), (await fundState()).advance_status],
+    [0, "fully_applied"],
+  );
+
+  check(
+    "a fund cannot give up more than was taken",
+    await expectFail(`
+      insert into public.contract_fund_applications
+        (company_id, contract_id, fund_kind, event, amount)
+      values (${lit(alpha)}, ${lit(fundContract)}, 'advance_payment', 'applied', 1);
+    `),
+    "blocked",
+  );
+
+  await db.query(`
+    insert into public.contract_fund_applications
+      (company_id, contract_id, fund_kind, event, amount)
+    values (${lit(alpha)}, ${lit(fundContract)}, 'security_deposit', 'refunded', 40000);
+  `);
+  check(
+    "a deposit returned in full reads as refunded, not applied",
+    (await fundState()).deposit_status,
+    "refunded",
+  );
+
+  // The contract keeps saying what was taken at signing, whatever has since
+  // been drawn -- that is what makes an argument at move-out settleable.
+  const untouched = await db.query(`
+    select security_deposit, advance_payment from public.contracts
+     where id = ${lit(fundContract)};
+  `);
+  check(
+    "drawing on the funds never rewrites the contract",
+    [Number(untouched[0].security_deposit), Number(untouched[0].advance_payment)],
+    [40000, 20000],
+  );
+
   console.log("\nVoiding a payment needs sign-off");
 
   const cashier = await makeUser("cashier");
