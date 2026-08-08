@@ -30,6 +30,14 @@ export default async function AppLayout({
   }
 
   const portfolio: NavItem[] = [];
+  /*
+   * Locations lead the portfolio rather than sitting in Administration. A
+   * location is the thing units, tenants and billing all hang off, which makes
+   * it the start of the property list, not a settings chore.
+   */
+  if (can(permissions, MODULE.adminLocations, "view")) {
+    portfolio.push({ href: "/portfolio/locations", label: "Locations" });
+  }
   if (can(permissions, MODULE.properties, "view")) {
     portfolio.push({ href: "/properties", label: "Properties & Units" });
   }
@@ -206,9 +214,6 @@ export default async function AppLayout({
   const administration: NavItem[] = [];
   if (context.isSuperAdmin || can(permissions, MODULE.adminCompanies, "view")) {
     administration.push({ href: "/admin/companies", label: "Companies" });
-  }
-  if (can(permissions, MODULE.adminLocations, "view")) {
-    administration.push({ href: "/admin/locations", label: "Locations" });
   }
   if (can(permissions, MODULE.adminUsers, "view")) {
     administration.push({ href: "/admin/users", label: "Users" });

@@ -80,7 +80,7 @@ export async function createLocation(
     after: parsed.data,
   });
 
-  revalidatePath("/admin/locations");
+  revalidatePath("/portfolio/locations");
   return { success: `Location "${data.name}" created.` };
 }
 
@@ -133,7 +133,7 @@ export async function updateLocation(
     after: diff.after,
   });
 
-  revalidatePath("/admin/locations");
+  revalidatePath("/portfolio/locations");
   return { success: "Location updated." };
 }
 
@@ -163,5 +163,5 @@ export async function setLocationActive(formData: FormData) {
     after: { is_active: isActive },
   });
 
-  revalidatePath("/admin/locations");
+  revalidatePath("/portfolio/locations");
 }

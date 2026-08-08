@@ -7,7 +7,7 @@ import { money } from "@/lib/format";
 import { MODULE, can } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
 
-import { PROPERTY_TYPES } from "../admin/locations/constants";
+import { PROPERTY_TYPES } from "../portfolio/locations/constants";
 
 export const metadata: Metadata = { title: "Properties & Units" };
 
