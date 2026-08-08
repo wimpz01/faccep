@@ -902,6 +902,71 @@ async function main() {
   check("input VAT is debited", await balanceOf("1400"), 1200);
   check("withholding tax payable is credited", await balanceOf("2110"), 500);
 
+  /**
+   * A direct bill listing two services charges each to its own account.
+   *
+   * The accrual used to fire before the lines existed, so every direct bill
+   * landed wholly in the fallback expense account. A bill that says it is
+   * awaiting lines now waits for them; one that does not still posts on
+   * insert, which is what the three checks above rely on.
+   */
+  const [security, hauling] = await db.query(`
+    insert into public.non_stock_items
+      (company_id, name, unit_of_measure, expense_account_id)
+    values (${lit(alpha)}, ${lit(`${TEST_TAG}-guarding`)}, 'lot',
+            public.account_by_code(${lit(alpha)}, '5300')),
+           (${lit(alpha)}, ${lit(`${TEST_TAG}-hauling`)},  'trip',
+            public.account_by_code(${lit(alpha)}, '5900'))
+    returning id;
+  `);
+
+  const splitBefore = {
+    security: await balanceOf("5300"),
+    misc: await balanceOf("5900"),
+  };
+
+  const splitBill = (
+    await db.query(`
+      insert into public.supplier_invoices
+        (company_id, vendor_id, invoice_no, invoice_date, due_date,
+         amount, vat_amount, withholding_tax, total, awaiting_lines)
+      values (${lit(alpha)}, ${lit(autoVendor)}, ${lit(`${TEST_TAG}-SPLIT`)},
+              '2026-05-11', '2026-06-11', 25000, 0, 0, 25000, true)
+      returning id;
+    `)
+  )[0].id;
+
+  await db.query(`
+    insert into public.supplier_invoice_lines
+      (invoice_id, line_no, description, unit_of_measure, quantity, unit_price,
+       non_stock_item_id)
+    values (${lit(splitBill)}, 1, 'Guard duty', 'lot',  1, 18000, ${lit(security.id)}),
+           (${lit(splitBill)}, 2, 'Hauling',    'trip', 1,  7000, ${lit(hauling.id)});
+  `);
+
+  check(
+    "a service line charges the account its item names",
+    (await balanceOf("5300")) - splitBefore.security,
+    18000,
+  );
+  check(
+    "a second service on the same bill charges its own account",
+    (await balanceOf("5900")) - splitBefore.misc,
+    7000,
+  );
+
+  const splitEntry = await db.query(`
+    select round(sum(jl.debit), 2) as debits, round(sum(jl.credit), 2) as credits
+      from public.journal_entries je
+      join public.journal_lines jl on jl.entry_id = je.id
+     where je.source_table = 'supplier_invoices' and je.source_id = ${lit(splitBill)};
+  `);
+  check(
+    "the split bill's entry balances",
+    [Number(splitEntry[0].debits), Number(splitEntry[0].credits)],
+    [25000, 25000],
+  );
+
   // Materials issued hit maintenance expense at cost.
   await db.query(`
     insert into public.inventory_movements
@@ -1781,6 +1846,9 @@ async function cleanup() {
     await db.query(`delete from public.inquiries where company_id in ${scope};`);
     await db.query(`delete from public.journal_entries where company_id in ${scope};`);
     await db.query(`delete from public.accounting_settings where company_id in ${scope};`);
+    // Services name the account they are charged to, and that reference is
+    // RESTRICT, so they have to go before the chart does.
+    await db.query(`delete from public.non_stock_items where company_id in ${scope};`);
     await db.query(`delete from public.chart_of_accounts where company_id in ${scope};`);
     await db.query(`delete from public.accounting_periods where company_id in ${scope};`);
     await db.query(`delete from public.check_vouchers where company_id in ${scope};`);

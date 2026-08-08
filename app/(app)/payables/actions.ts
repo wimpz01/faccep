@@ -33,6 +33,8 @@ const invoiceSchema = z.object({
 
 const invoiceLineSchema = z.object({
   item_id: z.string().uuid().nullish().or(z.literal("")),
+  // A service rather than stock. Brings its expense account onto the line.
+  non_stock_item_id: z.string().uuid().nullish().or(z.literal("")),
   sku: z.string().trim().nullish().or(z.literal("")),
   description: z.string().trim().min(1),
   unit_of_measure: z.string().trim().min(1).default("pc"),
@@ -153,6 +155,8 @@ export async function createSupplierInvoice(
       withholding_tax: withholding,
       receipt_id: parsed.data.receipt_id || null,
       po_id: parsed.data.po_id || null,
+      // Hold the ledger entry until the lines and their accounts are in.
+      awaiting_lines: lines.length > 0,
       job_id: parsed.data.job_id || null,
       location_id: locationId,
       expense_account_id: parsed.data.expense_account_id || null,
@@ -186,6 +190,7 @@ export async function createSupplierInvoice(
           unit_of_measure: line.unit_of_measure,
           quantity: line.quantity,
           unit_price: line.unit_price,
+          non_stock_item_id: line.non_stock_item_id || null,
         })),
       );
     // Without its lines the bill is not the document that was approved, so it
@@ -194,6 +199,8 @@ export async function createSupplierInvoice(
       await supabase.from("supplier_invoices").delete().eq("id", data.id);
       return { error: lineError.message };
     }
+    // Inserting the lines is what releases the ledger entry, now that their
+    // accounts are known.
   }
 
   await logAudit({

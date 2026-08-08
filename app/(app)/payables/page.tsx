@@ -128,6 +128,7 @@ export default async function PayablesPage({
     { data: locations },
     { data: pendingVoucherApprovals },
     { data: stockItems },
+    { data: nonStockItems },
   ] = await Promise.all([
     supabase
       .from("supplier_invoices")
@@ -175,6 +176,14 @@ export default async function PayablesPage({
     supabase
       .from("inventory_items")
       .select("id, sku, name, unit_of_measure, unit_cost")
+      .eq("company_id", companyId)
+      .eq("is_active", true)
+      .order("name"),
+    // Services carry the account they are charged to, so a bill line for one
+    // never has to pick an account by hand.
+    supabase
+      .from("non_stock_items")
+      .select("id, code, name, unit_of_measure, default_cost")
       .eq("company_id", companyId)
       .eq("is_active", true)
       .order("name"),
@@ -534,6 +543,7 @@ export default async function PayablesPage({
               expenseAccounts={expenseAccounts ?? []}
               locations={locations ?? []}
               items={stockItems ?? []}
+              nonStock={nonStockItems ?? []}
               receipts={unbilledReceipts}
               initialReceiptId={receipt}
             />
@@ -665,9 +675,13 @@ export default async function PayablesPage({
                     return (
                       <tr key={bill.id}>
                         <td>
-                          <span className="font-semibold text-sm tabular-nums">
+                          <Link
+                            href={`/payables/invoices/${bill.id}`}
+                            className="font-semibold text-sm tabular-nums"
+                            style={{ color: "var(--color-brand-600)" }}
+                          >
                             {bill.bill_no}
-                          </span>
+                          </Link>
                           <p className="text-xs muted">
                             Supplier ref. {bill.invoice_no}
                             {" · "}

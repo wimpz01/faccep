@@ -64,6 +64,14 @@ export type ExpenseAccountOption = { id: string; code: string; name: string };
 
 export type LocationOption = { id: string; code: string; name: string };
 
+export type NonStockOption = {
+  id: string;
+  code: string;
+  name: string;
+  unit_of_measure: string;
+  default_cost: string;
+};
+
 export type StockItemOption = {
   id: string;
   sku: string | null;
@@ -76,6 +84,7 @@ export type StockItemOption = {
 export type InvoiceLineDraft = {
   key: string;
   item_id: string;
+  non_stock_item_id: string;
   sku: string;
   description: string;
   unit_of_measure: string;
@@ -89,6 +98,7 @@ function blankLine(): InvoiceLineDraft {
   return {
     key: `line-${draftCounter}`,
     item_id: "",
+    non_stock_item_id: "",
     sku: "",
     description: "",
     unit_of_measure: "pc",
@@ -124,6 +134,7 @@ export function SupplierInvoiceForm({
   expenseAccounts,
   locations,
   items,
+  nonStock,
   receipts,
   initialReceiptId,
 }: {
@@ -132,6 +143,7 @@ export function SupplierInvoiceForm({
   expenseAccounts: ExpenseAccountOption[];
   locations: LocationOption[];
   items: StockItemOption[];
+  nonStock: NonStockOption[];
   receipts: InvoicePreload[];
   initialReceiptId?: string;
 }) {
@@ -186,15 +198,32 @@ export function SupplierInvoiceForm({
     );
   }
 
-  /** Choosing a stock item fills in what the item already knows. */
-  function pickItem(key: string, itemId: string) {
-    const item = items.find((row) => row.id === itemId);
+  /** Choosing an item or a service fills in what it already knows. */
+  function pickItem(key: string, value: string) {
+    // Services are prefixed so one dropdown can offer both.
+    if (value.startsWith("ns:")) {
+      const service = nonStock.find((row) => row.id === value.slice(3));
+      if (!service) return;
+      updateLine(key, {
+        item_id: "",
+        non_stock_item_id: service.id,
+        sku: service.code,
+        description: service.name,
+        unit_of_measure: service.unit_of_measure,
+        unit_price:
+          Number(service.default_cost) > 0 ? String(service.default_cost) : "",
+      });
+      return;
+    }
+
+    const item = items.find((row) => row.id === value);
     if (!item) {
-      updateLine(key, { item_id: "", sku: "" });
+      updateLine(key, { item_id: "", non_stock_item_id: "", sku: "" });
       return;
     }
     updateLine(key, {
       item_id: item.id,
+      non_stock_item_id: "",
       sku: item.sku ?? "",
       description: item.name,
       unit_of_measure: item.unit_of_measure,
@@ -210,6 +239,7 @@ export function SupplierInvoiceForm({
       )
       .map((line) => ({
         item_id: line.item_id,
+        non_stock_item_id: line.non_stock_item_id,
         sku: line.sku,
         description: line.description.trim(),
         unit_of_measure: line.unit_of_measure.trim() || "pc",
@@ -421,20 +451,39 @@ export function SupplierInvoiceForm({
                 <tr key={line.key}>
                   <td className="text-sm tabular-nums">{index + 1}</td>
                   <td>
+                    {/* Stock and services in one list: the person entering a
+                        bill is picking what was bought, not classifying it. */}
                     <select
                       className="select"
-                      value={line.item_id}
+                      value={
+                        line.non_stock_item_id
+                          ? `ns:${line.non_stock_item_id}`
+                          : line.item_id
+                      }
                       onChange={(event) =>
                         pickItem(line.key, event.currentTarget.value)
                       }
-                      aria-label={`Stock item for line ${index + 1}`}
+                      aria-label={`Item or service for line ${index + 1}`}
                     >
-                      <option value="">Not a stock item</option>
-                      {items.map((item) => (
-                        <option key={item.id} value={item.id}>
-                          {item.name}
-                        </option>
-                      ))}
+                      <option value="">Neither — type it below</option>
+                      {items.length > 0 ? (
+                        <optgroup label="Stock items">
+                          {items.map((item) => (
+                            <option key={item.id} value={item.id}>
+                              {item.name}
+                            </option>
+                          ))}
+                        </optgroup>
+                      ) : null}
+                      {nonStock.length > 0 ? (
+                        <optgroup label="Services (non-stock)">
+                          {nonStock.map((service) => (
+                            <option key={service.id} value={`ns:${service.id}`}>
+                              {service.name}
+                            </option>
+                          ))}
+                        </optgroup>
+                      ) : null}
                     </select>
                   </td>
                   <td>
