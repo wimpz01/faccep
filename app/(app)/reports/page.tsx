@@ -75,7 +75,15 @@ const REPORTS: {
   {
     href: "/accounting/reports",
     title: "Financial statements",
-    description: "Income statement, balance sheet, trial balance and cash flow.",
+    description:
+      "Income statement, balance sheet, trial balance and cash flow — together or one at a time.",
+    moduleKey: MODULE.reportsFinancials,
+  },
+  {
+    href: "/accounting/reports/quarterly",
+    title: "Quarterly income comparison",
+    description:
+      "The income statement read across the year, one quarter beside another.",
     moduleKey: MODULE.reportsFinancials,
   },
 ];

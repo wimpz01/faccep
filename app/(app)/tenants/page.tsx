@@ -61,15 +61,20 @@ export default async function TenantsPage({
         description="Tenant companies, their VAT status and their live contracts."
         action={
           canEdit ? (
-            adding ? (
-              <Link href="/tenants" className="btn btn-secondary btn-sm">
-                Close
+            <div className="flex gap-2 flex-wrap">
+              <Link href="/tenants/import" className="btn btn-secondary btn-sm">
+                Import a list
               </Link>
-            ) : (
-              <Link href="/tenants?add=1" className="btn btn-primary btn-sm">
-                + New tenant
-              </Link>
-            )
+              {adding ? (
+                <Link href="/tenants" className="btn btn-secondary btn-sm">
+                  Close
+                </Link>
+              ) : (
+                <Link href="/tenants?add=1" className="btn btn-primary btn-sm">
+                  + New tenant
+                </Link>
+              )}
+            </div>
           ) : null
         }
       />

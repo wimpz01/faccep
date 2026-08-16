@@ -173,12 +173,13 @@ export default async function TenantDetailPage({
     ? await supabase
         .from("contract_fund_status")
         .select(
-          `deposit_taken, deposit_drawn, deposit_remaining, deposit_status,
+          `deposit_taken, deposit_received, deposit_drawn, deposit_remaining, deposit_status,
            advance_taken, advance_drawn, advance_remaining, advance_status`,
         )
         .eq("contract_id", current.id)
         .maybeSingle<{
           deposit_taken: string;
+          deposit_received: string;
           deposit_drawn: string;
           deposit_remaining: string;
           deposit_status: string;
@@ -269,17 +270,22 @@ export default async function TenantDetailPage({
                 : "No escalation on this contract"
             }
           />
+          {/* The figure is what was receipted, less what has been drawn --
+              not what the contract agreed. A deposit never collected shows
+              zero held and says so. */}
           <StatTile
             label="Security deposit"
-            value={money(funds?.deposit_remaining ?? current.security_deposit)}
+            value={money(funds?.deposit_remaining ?? 0)}
             hint={
-              funds
-                ? `${FUND_STATUS[funds.deposit_status] ?? funds.deposit_status}${
-                    Number(funds.deposit_drawn) > 0
-                      ? ` · ${money(funds.deposit_drawn)} of ${money(funds.deposit_taken)} drawn`
-                      : ` · ${money(funds.deposit_taken)} taken at signing`
-                  }`
-                : "Held"
+              !funds
+                ? "Held"
+                : funds.deposit_status === "not_received"
+                  ? `${money(funds.deposit_taken)} agreed — no receipt recorded`
+                  : `${FUND_STATUS[funds.deposit_status] ?? funds.deposit_status}${
+                      Number(funds.deposit_drawn) > 0
+                        ? ` · ${money(funds.deposit_drawn)} of ${money(funds.deposit_received)} drawn`
+                        : ` · ${money(funds.deposit_received)} received`
+                    }`
             }
           />
           <StatTile

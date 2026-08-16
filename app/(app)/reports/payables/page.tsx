@@ -24,9 +24,9 @@ type BillRow = {
 export default async function PayablesAgingReport({
   searchParams,
 }: {
-  searchParams: Promise<{ vendor?: string }>;
+  searchParams: Promise<{ vendor?: string; view?: string }>;
 }) {
-  const { vendor } = await searchParams;
+  const { vendor, view } = await searchParams;
   const context = await requirePermission(MODULE.reportsExpenses, "view");
   const companyId = context.activeCompany!.companyId;
 
@@ -50,10 +50,17 @@ export default async function PayablesAgingReport({
       .returns<{ id: string; name: string }[]>(),
   ]);
 
-  // A named supplier narrows the whole report; anything else reports on all of
-  // them. An unknown id is treated as "all" rather than silently showing an
-  // empty page.
+  /*
+   * Two controls doing two jobs. The supplier narrows what the report covers;
+   * the view decides whether that comes back as aged totals or as the invoices
+   * behind them. Both live in the URL, so a particular view of a particular
+   * supplier can be bookmarked or sent to somebody.
+   *
+   * An unknown supplier id is treated as "all" rather than silently showing an
+   * empty page.
+   */
   const chosen = (vendors ?? []).find((row) => row.id === vendor) ?? null;
+  const detailed = view === "detail";
 
   const open = (bills ?? [])
     .map((bill) => ({
@@ -91,34 +98,51 @@ export default async function PayablesAgingReport({
       title="Supplier aging"
       description="What is owed to each supplier, aged from the day each invoice fell due."
       showRange={false}
-      scopeNote={chosen ? chosen.name : "All suppliers"}
+      scopeNote={`${chosen ? chosen.name : "All suppliers"} · ${
+        detailed ? "Detailed" : "Summary"
+      }`}
       extraFilters={
-        <div className="sm:col-span-2">
-          <label className="label" htmlFor="vendor">
-            Supplier
-          </label>
-          <select
-            id="vendor"
-            name="vendor"
-            className="select"
-            defaultValue={chosen?.id ?? ""}
-          >
-            <option value="">All suppliers — summary</option>
-            {(vendors ?? []).map((row) => (
-              <option key={row.id} value={row.id}>
-                {row.name}
-              </option>
-            ))}
-          </select>
-          <p className="text-xs muted mt-1">
-            Choose a supplier for a detailed statement of what is owed to them.
-          </p>
-        </div>
+        <>
+          <div className="sm:col-span-2">
+            <label className="label" htmlFor="view">
+              Show
+            </label>
+            <select
+              id="view"
+              name="view"
+              className="select"
+              defaultValue={detailed ? "detail" : "summary"}
+            >
+              <option value="summary">Summary — aged totals</option>
+              <option value="detail">Detailed — every open invoice</option>
+            </select>
+          </div>
+          <div className="sm:col-span-2">
+            <label className="label" htmlFor="vendor">
+              Supplier
+            </label>
+            <select
+              id="vendor"
+              name="vendor"
+              className="select"
+              defaultValue={chosen?.id ?? ""}
+            >
+              <option value="">All suppliers</option>
+              {(vendors ?? []).map((row) => (
+                <option key={row.id} value={row.id}>
+                  {row.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        </>
       }
+      filterNote="The supplier narrows either view. One supplier with Detailed gives you their statement."
     >
-      <div className="mb-5">
+      {!detailed ? (
         <Card
           title={chosen ? `Aging — ${chosen.name}` : "Aging summary"}
+          description="What is owed, split by how long it has been due."
           bodyClassName=""
         >
           {rows.length > 0 ? (
@@ -175,14 +199,13 @@ export default async function PayablesAgingReport({
             </EmptyState>
           )}
         </Card>
-      </div>
-
+      ) : (
       <Card
-        title={chosen ? "Invoices outstanding" : "Detail"}
+        title={chosen ? `Invoices outstanding — ${chosen.name}` : "Detail"}
         description={
           chosen
             ? `Every open invoice from ${chosen.name}, oldest due first.`
-            : undefined
+            : "Every open invoice, oldest due first."
         }
         bodyClassName=""
       >
@@ -264,6 +287,7 @@ export default async function PayablesAgingReport({
           <EmptyState>Nothing outstanding.</EmptyState>
         )}
       </Card>
+      )}
     </ReportShell>
   );
 }

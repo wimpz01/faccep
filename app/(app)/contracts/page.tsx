@@ -1,13 +1,13 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 
-import { Card, EmptyState, FilterNote, PageHeader, StatTile } from "@/components/ui";
+import { Card, FilterNote, PageHeader, StatTile } from "@/components/ui";
 import { requirePermission } from "@/lib/auth";
-import { formatDate, money, monthsUntil } from "@/lib/format";
+import { money, monthsUntil } from "@/lib/format";
 import { MODULE, can } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
 
-import { CONTRACT_STATUS_BADGE } from "./constants";
+import { ContractList } from "./contract-list";
 
 export const metadata: Metadata = { title: "Contracts" };
 
@@ -121,74 +121,28 @@ export default async function ContractsPage({
       ) : null}
 
       <Card title="All contracts" bodyClassName="">
-        {shown.length > 0 ? (
-          <div className="table-scroll">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Contract</th>
-                  <th>Tenant</th>
-                  <th>Units</th>
-                  <th>Term</th>
-                  <th className="text-right">Monthly rent</th>
-                  <th className="text-right">Escalation</th>
-                  <th>Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {shown.map((row) => {
-                  const months = monthsUntil(row.end_date);
-                  const endingSoon =
-                    row.status === "active" && months !== null && months <= 6;
-                  return (
-                    <tr key={row.id}>
-                      <td>
-                        <Link
-                          href={`/contracts/${row.id}`}
-                          className="font-semibold"
-                          style={{ color: "var(--color-brand-600)" }}
-                        >
-                          {row.contract_no}
-                        </Link>
-                      </td>
-                      <td className="text-sm">{row.tenants?.company_name ?? "—"}</td>
-                      <td className="text-xs">
-                        {(row.contract_units ?? [])
-                          .map((link) => link.units?.code)
-                          .filter(Boolean)
-                          .join(", ") || "—"}
-                      </td>
-                      <td className="text-xs">
-                        {formatDate(row.start_date)} – {formatDate(row.end_date)}
-                        {endingSoon ? (
-                          <p style={{ color: "var(--danger)" }}>
-                            Renewal notice due
-                          </p>
-                        ) : null}
-                      </td>
-                      <td className="text-right tabular-nums">
-                        {money(row.monthly_rent)}
-                      </td>
-                      <td className="text-right tabular-nums">
-                        {Number(row.escalation_rate)}%
-                      </td>
-                      <td>
-                        <span className={CONTRACT_STATUS_BADGE[row.status] ?? "badge"}>
-                          {row.status}
-                        </span>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <EmptyState>
-            No contracts yet
-            {canEdit ? " — create one from a tenant profile or above." : "."}
-          </EmptyState>
-        )}
+        <ContractList
+          rows={shown.map((row) => ({
+            id: row.id,
+            contract_no: row.contract_no,
+            tenant: row.tenants?.company_name ?? "—",
+            units:
+              (row.contract_units ?? [])
+                .map((link) => link.units?.code)
+                .filter(Boolean)
+                .join(", ") || "—",
+            start_date: row.start_date,
+            end_date: row.end_date,
+            monthly_rent: row.monthly_rent,
+            escalation_rate: row.escalation_rate,
+            status: row.status,
+          }))}
+          emptyHint={
+            canEdit
+              ? "No contracts yet — create one from a tenant profile or above."
+              : "No contracts yet."
+          }
+        />
       </Card>
     </>
   );

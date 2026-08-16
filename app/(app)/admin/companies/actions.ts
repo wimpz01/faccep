@@ -15,6 +15,7 @@ const companySchema = z.object({
   legal_name: z.string().trim().nullish().or(z.literal("")),
   tin: z.string().trim().nullish().or(z.literal("")),
   address: z.string().trim().nullish().or(z.literal("")),
+  zip_code: z.string().trim().nullish().or(z.literal("")),
   contact_person: z.string().trim().nullish().or(z.literal("")),
   contact_number: z.string().trim().nullish().or(z.literal("")),
   email: z
@@ -31,6 +32,7 @@ function readCompanyForm(formData: FormData) {
     legal_name: formData.get("legal_name"),
     tin: formData.get("tin"),
     address: formData.get("address"),
+    zip_code: formData.get("zip_code"),
     contact_person: formData.get("contact_person"),
     contact_number: formData.get("contact_number"),
     email: formData.get("email"),
@@ -113,7 +115,9 @@ export async function updateCompany(
   const supabase = await createClient();
   const { data: before } = await supabase
     .from("companies")
-    .select("name, legal_name, tin, address, contact_person, contact_number, email")
+    .select(
+      "name, legal_name, tin, address, zip_code, contact_person, contact_number, email",
+    )
     .eq("id", companyId)
     .single();
 

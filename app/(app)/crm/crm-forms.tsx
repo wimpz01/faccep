@@ -362,6 +362,13 @@ export function CalendarEventForm({
           defaultValue={new Date().toISOString().slice(0, 10)}
         />
       </div>
+      {/* Optional: a reminder with no time is simply for that day. */}
+      <div>
+        <label className="label" htmlFor="cal-time">
+          Time
+        </label>
+        <input id="cal-time" name="event_time" type="time" className="input" />
+      </div>
       <div>
         <label className="label" htmlFor="cal-remind">
           Remind (days before)
@@ -375,7 +382,7 @@ export function CalendarEventForm({
           defaultValue="0"
         />
       </div>
-      <div className="sm:col-span-4">
+      <div className="sm:col-span-3">
         <label className="label" htmlFor="cal-details">
           Details
         </label>
@@ -383,6 +390,95 @@ export function CalendarEventForm({
       </div>
       <div className="sm:col-span-4 flex items-center gap-3 flex-wrap">
         <Submit label="Add" />
+        <Result state={state} />
+      </div>
+    </form>
+  );
+}
+
+/** The same fields as the add form, filled in, for editing one reminder. */
+export function CalendarEventEditForm({
+  action,
+  event,
+}: {
+  action: (state: ActionState, formData: FormData) => Promise<ActionState>;
+  event: {
+    id: string;
+    title: string;
+    details: string | null;
+    event_date: string;
+    event_time: string | null;
+    remind_days_before: number;
+  };
+}) {
+  const [state, formAction] = useActionState<ActionState, FormData>(action, {});
+  return (
+    <form action={formAction} className="grid gap-4 sm:grid-cols-4">
+      <input type="hidden" name="id" value={event.id} />
+      <div className="sm:col-span-2">
+        <label className="label" htmlFor="edit-title">
+          What *
+        </label>
+        <input
+          id="edit-title"
+          name="title"
+          className="input"
+          required
+          defaultValue={event.title}
+        />
+      </div>
+      <div>
+        <label className="label" htmlFor="edit-date">
+          When *
+        </label>
+        <input
+          id="edit-date"
+          name="event_date"
+          type="date"
+          className="input"
+          required
+          defaultValue={event.event_date.slice(0, 10)}
+        />
+      </div>
+      <div>
+        <label className="label" htmlFor="edit-time">
+          Time
+        </label>
+        <input
+          id="edit-time"
+          name="event_time"
+          type="time"
+          className="input"
+          // Postgres returns HH:MM:SS; the input wants HH:MM.
+          defaultValue={event.event_time ? event.event_time.slice(0, 5) : ""}
+        />
+      </div>
+      <div>
+        <label className="label" htmlFor="edit-remind">
+          Remind (days before)
+        </label>
+        <input
+          id="edit-remind"
+          name="remind_days_before"
+          type="number"
+          min="0"
+          className="input"
+          defaultValue={event.remind_days_before}
+        />
+      </div>
+      <div className="sm:col-span-3">
+        <label className="label" htmlFor="edit-details">
+          Details
+        </label>
+        <input
+          id="edit-details"
+          name="details"
+          className="input"
+          defaultValue={event.details ?? ""}
+        />
+      </div>
+      <div className="sm:col-span-4 flex items-center gap-3 flex-wrap">
+        <Submit label="Save reminder" />
         <Result state={state} />
       </div>
     </form>

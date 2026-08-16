@@ -15,6 +15,58 @@ import { formatDate } from "@/lib/format";
  * printed report that names neither the company, the report nor the date it
  * was taken is not evidence of anything.
  */
+/**
+ * The heading a report grows when it reaches paper.
+ *
+ * A printout that names neither the company, the report, nor the date it was
+ * taken is not evidence of anything -- it is a page of numbers. Kept separate
+ * from ReportShell so a report that builds its own chrome can still print a
+ * proper head.
+ */
+export function ReportMasthead({
+  companyName,
+  title,
+  scopeNote,
+  from,
+  to,
+  showRange = true,
+}: {
+  companyName?: string;
+  title: string;
+  scopeNote?: string;
+  from?: string;
+  to?: string;
+  showRange?: boolean;
+}) {
+  const today = new Date().toISOString().slice(0, 10);
+  return (
+    <div className="print-only" style={{ marginBottom: "1rem" }}>
+      {companyName ? (
+        <p style={{ fontWeight: 700, marginBottom: "0.15rem" }}>{companyName}</p>
+      ) : null}
+      <h1
+        style={{
+          fontSize: "1.15rem",
+          fontWeight: 700,
+          textTransform: "uppercase",
+          letterSpacing: "0.06em",
+        }}
+      >
+        {title}
+      </h1>
+      {scopeNote ? (
+        <p style={{ fontSize: "0.85rem", fontWeight: 600 }}>{scopeNote}</p>
+      ) : null}
+      <p style={{ fontSize: "0.8rem" }}>
+        {showRange && from && to
+          ? `For ${formatDate(from)} to ${formatDate(to)}`
+          : `As at ${formatDate(today)}`}
+        {` · printed ${formatDate(today)}`}
+      </p>
+    </div>
+  );
+}
+
 export async function ReportShell({
   title,
   description,
@@ -22,6 +74,7 @@ export async function ReportShell({
   to,
   showRange = true,
   extraFilters,
+  filterNote,
   scopeNote,
   children,
 }: {
@@ -31,40 +84,30 @@ export async function ReportShell({
   to?: string;
   showRange?: boolean;
   extraFilters?: ReactNode;
+  /**
+   * A word about the filters, shown under the whole row rather than beneath
+   * one field. Kept out of the grid so every control sits on the same line:
+   * a hint inside one cell makes that cell taller and drops its input below
+   * its neighbours'.
+   */
+  filterNote?: ReactNode;
   /** What the report was narrowed to, named on the printed copy. */
   scopeNote?: string;
   children: ReactNode;
 }) {
   const context = await getSessionContext();
   const companyName = context?.activeCompany?.companyName ?? "";
-  const today = new Date().toISOString().slice(0, 10);
 
   return (
     <>
-      <div className="print-only" style={{ marginBottom: "1rem" }}>
-        {companyName ? (
-          <p style={{ fontWeight: 700, marginBottom: "0.15rem" }}>{companyName}</p>
-        ) : null}
-        <h1
-          style={{
-            fontSize: "1.15rem",
-            fontWeight: 700,
-            textTransform: "uppercase",
-            letterSpacing: "0.06em",
-          }}
-        >
-          {title}
-        </h1>
-        {scopeNote ? (
-          <p style={{ fontSize: "0.85rem", fontWeight: 600 }}>{scopeNote}</p>
-        ) : null}
-        <p style={{ fontSize: "0.8rem" }}>
-          {showRange && from && to
-            ? `For ${formatDate(from)} to ${formatDate(to)}`
-            : `As at ${formatDate(today)}`}
-          {` · printed ${formatDate(today)}`}
-        </p>
-      </div>
+      <ReportMasthead
+        companyName={companyName}
+        title={title}
+        scopeNote={scopeNote}
+        from={from}
+        to={to}
+        showRange={showRange}
+      />
 
       <div className="no-print">
         <PageHeader
@@ -119,6 +162,9 @@ export async function ReportShell({
                   </button>
                 </div>
               </form>
+              {filterNote ? (
+                <p className="text-xs muted mt-2">{filterNote}</p>
+              ) : null}
             </div>
           </div>
         ) : null}

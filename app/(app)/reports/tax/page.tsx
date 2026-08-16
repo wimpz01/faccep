@@ -53,7 +53,7 @@ function currentQuarter() {
 export default async function TaxReports({
   searchParams,
 }: {
-  searchParams: Promise<{ quarter?: string }>;
+  searchParams: Promise<{ quarter?: string; form?: string }>;
 }) {
   const filters = await searchParams;
   const context = await requirePermission(MODULE.reportsTax, "view");
@@ -61,6 +61,22 @@ export default async function TaxReports({
 
   const quarter = filters.quarter ?? currentQuarter();
   const { from, to, year, q } = quarterRange(quarter);
+
+  /*
+   * Which form is being prepared. Everything is worked out either way -- the
+   * filter only decides what reaches the page, so printing one form gives a
+   * sheet with that form on it and nothing else to confuse whoever files it.
+   */
+  const FORMS = {
+    all: "All tax reports",
+    "2307": "BIR Form 2307",
+    "1601eq": "BIR Form 1601-EQ",
+    vat: "VAT relief",
+  } as const;
+  type FormKey = keyof typeof FORMS;
+  const form: FormKey =
+    filters.form && filters.form in FORMS ? (filters.form as FormKey) : "all";
+  const shows = (key: Exclude<FormKey, "all">) => form === "all" || form === key;
 
   const supabase = await createClient();
   const [{ data: bills }, { data: sales }, { data: company }] = await Promise.all([
@@ -141,53 +157,86 @@ export default async function TaxReports({
       title="Tax reports"
       description={`${company?.legal_name ?? company?.name ?? ""}${company?.tin ? ` · TIN ${company.tin}` : ""} — Q${q} ${year} (${formatDate(from)} to ${formatDate(to)})`}
       showRange={false}
+      scopeNote={`${FORMS[form]} · Q${q} ${year}`}
+      extraFilters={
+        <>
+          <div className="sm:col-span-2">
+            <label className="label" htmlFor="form">
+              Tax report
+            </label>
+            <select
+              id="form"
+              name="form"
+              className="select"
+              defaultValue={form}
+            >
+              <option value="all">All tax reports</option>
+              <option value="2307">
+                Form 2307 — creditable tax withheld
+              </option>
+              <option value="1601eq">
+                Form 1601-EQ — quarterly remittance
+              </option>
+              <option value="vat">VAT relief — schedule of sales</option>
+            </select>
+          </div>
+          <div className="sm:col-span-2">
+            <label className="label" htmlFor="quarter">
+              Quarter
+            </label>
+            <select
+              id="quarter"
+              name="quarter"
+              className="select"
+              defaultValue={quarter}
+            >
+              {[...new Set(quarters)]
+                .sort()
+                .reverse()
+                .map((value) => (
+                  <option key={value} value={value}>
+                    {value}
+                  </option>
+                ))}
+            </select>
+          </div>
+        </>
+      }
+      filterNote="Pick one report to print it on its own; the figures are the same either way."
     >
-      <div className="no-print card mb-5">
-        <div className="card-body">
-          <form method="get" className="flex items-end gap-3 flex-wrap">
-            <div>
-              <label className="label" htmlFor="quarter">
-                Quarter
-              </label>
-              <select
-                id="quarter"
-                name="quarter"
-                className="select"
-                defaultValue={quarter}
-              >
-                {[...new Set(quarters)]
-                  .sort()
-                  .reverse()
-                  .map((value) => (
-                    <option key={value} value={value}>
-                      {value}
-                    </option>
-                  ))}
-              </select>
-            </div>
-            <button type="submit" className="btn btn-primary">
-              Apply
-            </button>
-          </form>
-        </div>
-      </div>
-
+      {/* Only the figures belonging to the chosen form, so a printed 2307 is
+          not headed by VAT totals that have nothing to do with it. */}
       <div className="grid gap-4 sm:grid-cols-4 mb-5">
-        <StatTile
-          label="Tax withheld"
-          value={money(totalWithheld)}
-          hint="Creditable, this quarter"
-          tone="money"
-        />
-        <StatTile label="Output VAT" value={money(outputVat)} hint="On VATable sales" />
-        <StatTile label="Input VAT" value={money(inputVat)} hint="On supplier invoices" />
-        <StatTile
-          label="Net VAT payable"
-          value={money(round2(outputVat - inputVat))}
-          hint="Output less input"
-        />
+        {form === "all" || form === "2307" || form === "1601eq" ? (
+          <StatTile
+            label="Tax withheld"
+            value={money(totalWithheld)}
+            hint="Creditable, this quarter"
+            tone="money"
+          />
+        ) : null}
+        {form === "all" || form === "vat" ? (
+          <>
+            <StatTile
+              label="Output VAT"
+              value={money(outputVat)}
+              hint="On VATable sales"
+            />
+            <StatTile
+              label="Input VAT"
+              value={money(inputVat)}
+              hint="On supplier invoices"
+            />
+            <StatTile
+              label="Net VAT payable"
+              value={money(round2(outputVat - inputVat))}
+              hint="Output less input"
+            />
+          </>
+        ) : null}
       </div>
 
+      {shows("2307") ? (
       <div className="mb-5">
         <Card
           title="BIR Form 2307 — creditable tax withheld at source"
@@ -239,7 +288,9 @@ export default async function TaxReports({
           )}
         </Card>
       </div>
+      ) : null}
 
+      {shows("1601eq") ? (
       <div className="mb-5">
         <Card
           title="BIR Form 1601-EQ — quarterly remittance summary"
@@ -274,7 +325,9 @@ export default async function TaxReports({
           </div>
         </Card>
       </div>
+      ) : null}
 
+      {shows("vat") ? (
       <Card
         title="VAT relief — schedule of sales"
         description="VATable and exempt sales for the quarter, per customer."
@@ -340,6 +393,7 @@ export default async function TaxReports({
           <EmptyState>No sales in this quarter.</EmptyState>
         )}
       </Card>
+      ) : null}
 
       <p className="text-xs muted mt-3">
         These are the figures the forms need, laid out for transcription onto the

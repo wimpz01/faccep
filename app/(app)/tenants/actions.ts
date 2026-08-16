@@ -6,6 +6,7 @@ import { z } from "zod";
 
 import { changedFields, logAudit } from "@/lib/audit";
 import { assertPermission, getSessionContext } from "@/lib/auth";
+import { csvLines, splitCsvLine } from "@/lib/csv";
 import { MODULE, can } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
 
@@ -248,4 +249,147 @@ export async function deleteTenant(formData: FormData) {
   });
 
   redirect("/tenants");
+}
+
+/**
+ * Adds many tenants from a spreadsheet, instead of typing them in one by one.
+ *
+ * The whole file is checked before anything is written, so a typo on line 40
+ * cannot leave 39 tenants half-imported and the rest missing. A name already on
+ * file is reported rather than duplicated: a second "Kapetirya Cafe" would give
+ * two tenants that every invoice and contract afterwards has to be told apart
+ * by eye.
+ *
+ * Only the tenant record is imported. Contracts, units and deposits each carry
+ * their own dates and money and are set up per tenant afterwards.
+ */
+export async function importTenants(
+  _prevState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  let companyId: string;
+  try {
+    const context = await assertPermission(MODULE.tenants, "edit");
+    companyId = context.activeCompany!.companyId;
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+
+  const raw = String(formData.get("csv") ?? "").trim();
+  if (!raw) return { error: "Choose a file, or paste the rows in." };
+
+  const lines = csvLines(raw);
+  if (lines.length < 2) return { error: "That file has a header but no rows." };
+
+  const header = splitCsvLine(lines[0]).map((cell) => cell.toLowerCase());
+  if (!header.includes("company_name")) {
+    return {
+      error:
+        "The header is missing: company_name. Download the template to see the expected columns.",
+    };
+  }
+
+  const at = (cells: string[], column: string) => {
+    const index = header.indexOf(column);
+    return index === -1 ? "" : (cells[index] ?? "");
+  };
+
+  /** Accepts what a person actually types in a spreadsheet for yes and no. */
+  const asBoolean = (value: string) =>
+    ["yes", "y", "true", "1", "vat", "vatable"].includes(
+      value.trim().toLowerCase(),
+    );
+
+  const rows: ReturnType<typeof toRow>[] = [];
+  const problems: string[] = [];
+  const seen = new Set<string>();
+
+  for (let i = 1; i < lines.length; i += 1) {
+    const cells = splitCsvLine(lines[i]);
+    const line = i + 1;
+    const name = at(cells, "company_name");
+
+    if (!name) {
+      problems.push(`Line ${line}: no company name.`);
+      continue;
+    }
+    if (seen.has(name.toLowerCase())) {
+      problems.push(`Line ${line}: "${name}" appears twice in this file.`);
+      continue;
+    }
+    seen.add(name.toLowerCase());
+
+    const parsed = tenantSchema.safeParse({
+      company_name: name,
+      address: at(cells, "address"),
+      company_number: at(cells, "company_number"),
+      contact_person: at(cells, "contact_person"),
+      mobile_number: at(cells, "mobile_number"),
+      email: at(cells, "email"),
+      tin: at(cells, "tin"),
+      is_vatable: asBoolean(at(cells, "is_vatable")),
+      notes: at(cells, "notes"),
+    });
+    if (!parsed.success) {
+      problems.push(`Line ${line}: ${parsed.error.issues[0].message}`);
+      continue;
+    }
+
+    rows.push(toRow(parsed.data));
+  }
+
+  if (problems.length > 0) {
+    return {
+      error: `Nothing was imported. ${problems.slice(0, 8).join(" ")}${
+        problems.length > 8 ? ` (+${problems.length - 8} more)` : ""
+      }`,
+    };
+  }
+  if (rows.length === 0) return { error: "That file has no rows to import." };
+
+  const supabase = await createClient();
+
+  // A name already on file is a different tenant or the same one twice, and
+  // neither is worth guessing at.
+  const { data: existing } = await supabase
+    .from("tenants")
+    .select("company_name")
+    .eq("company_id", companyId);
+
+  const onFile = new Set(
+    (existing ?? []).map((row) => row.company_name.toLowerCase()),
+  );
+  const clashes = rows
+    .filter((row) => onFile.has(row.company_name.toLowerCase()))
+    .map((row) => row.company_name);
+
+  if (clashes.length > 0) {
+    return {
+      error: `Nothing was imported. Already on file: ${clashes.slice(0, 6).join(", ")}${
+        clashes.length > 6 ? ` (+${clashes.length - 6} more)` : ""
+      }.`,
+    };
+  }
+
+  const { data: inserted, error } = await supabase
+    .from("tenants")
+    .insert(rows.map((row) => ({ company_id: companyId, ...row })))
+    .select("id");
+
+  if (error) return { error: error.message };
+
+  await logAudit({
+    action: "create",
+    moduleKey: MODULE.tenants,
+    entityTable: "tenants",
+    summary: `Imported ${rows.length} tenant${rows.length === 1 ? "" : "s"} from a spreadsheet.`,
+    after: { count: rows.length, names: rows.map((row) => row.company_name) },
+  });
+
+  revalidatePath("/tenants");
+  return {
+    success: `Imported ${inserted?.length ?? rows.length} tenant${
+      (inserted?.length ?? rows.length) === 1 ? "" : "s"
+    }.`,
+  };
 }

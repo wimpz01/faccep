@@ -9,12 +9,32 @@ import {
   type UtilityUsagePoint,
 } from "@/components/utility-usage-chart";
 import { requireSession } from "@/lib/auth";
-import { derivedRate, reconcile, round3 } from "@/lib/billing";
-import { formatDate, money, monthsUntil } from "@/lib/format";
+import { effectiveRate, reconcile, round3 } from "@/lib/billing";
+import { formatDate, formatTime, money, monthsUntil } from "@/lib/format";
+import { nextScheduledDate } from "@/lib/maintenance";
 import { MODULE, can } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
 
+import { resetDashboardLayout, saveDashboardLayout } from "./actions";
+import { PANEL_KEYS, TILE_KEYS, applyOrder } from "./layout-order";
+import { SortableDashboard } from "./sortable-dashboard";
+
 export const metadata: Metadata = { title: "Dashboard" };
+
+/** What the grip says it is moving, for anyone reading by keyboard. */
+const LAYOUT_LABELS: Record<string, string> = {
+  "my-calendar": "Coming up",
+  collected: "Collected this month",
+  receivables: "Receivables",
+  attention: "Needs attention",
+  overdue: "Overdue accounts",
+  approvals: "Awaiting your approval",
+  occupancy: "Occupancy",
+  notifications: "Notifications",
+  "occupancy-by-location": "Occupancy per location",
+  "postdated-cheques": "Postdated cheques",
+  "utility-usage": "Utility usage",
+};
 
 /** Spec 3: warn two days before the due date, and once overdue. */
 const DUE_SOON_DAYS = 2;
@@ -29,6 +49,13 @@ const PDC_HORIZON_DAYS = 30;
  * rather than making a decision.
  */
 const ESCALATION_NOTICE_DAYS = 60;
+/**
+ * How far ahead your own reminders reach on the dashboard.
+ *
+ * A month is what you can act on. Anything further out belongs on the calendar
+ * itself, which is a click away and shows six.
+ */
+const REMINDER_HORIZON_DAYS = 30;
 
 export default async function DashboardPage({
   searchParams,
@@ -54,6 +81,11 @@ export default async function DashboardPage({
     .slice(0, 10);
   const escalationHorizon = new Date(
     Date.now() + ESCALATION_NOTICE_DAYS * 86_400_000,
+  )
+    .toISOString()
+    .slice(0, 10);
+  const reminderHorizon = new Date(
+    Date.now() + REMINDER_HORIZON_DAYS * 86_400_000,
   )
     .toISOString()
     .slice(0, 10);
@@ -83,6 +115,8 @@ export default async function DashboardPage({
     { data: periods },
     { data: allCheques },
     { data: risesDue },
+    { data: myReminders },
+    { data: dueSchedules },
   ] = await Promise.all([
     seeOccupancy
       ? supabase
@@ -104,7 +138,7 @@ export default async function DashboardPage({
       ? supabase
           .from("invoices")
           .select(
-            "id, invoice_no, due_date, total, amount_paid, credited_amount, tenants(company_name)",
+            "id, invoice_no, tenant_id, due_date, total, amount_paid, credited_amount, tenants(company_name)",
           )
           .eq("company_id", companyId)
           .in("status", ["released", "partially_paid"])
@@ -113,6 +147,7 @@ export default async function DashboardPage({
             {
               id: string;
               invoice_no: string;
+              tenant_id: string;
               due_date: string;
               total: string;
               amount_paid: string;
@@ -176,7 +211,7 @@ export default async function DashboardPage({
       ? supabase
           .from("utility_periods")
           .select(
-            "id, utility, period_start, provider_amount, provider_consumption, locations(code), meter_readings(consumption)",
+            "id, utility, period_start, provider_amount, provider_consumption, manual_rate, locations(code), meter_readings(consumption)",
           )
           .eq("company_id", companyId)
           .gte("period_start", twelveMonthsAgo)
@@ -189,6 +224,7 @@ export default async function DashboardPage({
               period_start: string;
               provider_amount: string;
               provider_consumption: string;
+              manual_rate: number | null;
               locations: { code: string } | null;
               meter_readings: { consumption: string }[];
             }[]
@@ -238,7 +274,104 @@ export default async function DashboardPage({
             }[]
           >()
       : Promise.resolve({ data: null }),
+    /*
+     * Your own reminders. Not behind a dashboard permission, because there is
+     * nothing here to permit: the calendar is personal, the policy already
+     * limits it to your own rows, and a reminder you wrote to yourself should
+     * not need an administrator's grant to reach you.
+     */
+    supabase
+      .from("calendar_events")
+      .select("id, title, event_date, event_time")
+      .eq("user_id", context.userId)
+      .eq("is_done", false)
+      .lte("event_date", reminderHorizon)
+      .order("event_date")
+      .limit(8)
+      .returns<
+        {
+          id: string;
+          title: string;
+          event_date: string;
+          event_time: string | null;
+        }[]
+      >(),
+    // Scheduled maintenance sits alongside them: it is company work rather
+    // than personal, so it needs the module's view right.
+    can(permissions, MODULE.maintenanceScheduled, "view")
+      ? supabase
+          .from("maintenance_schedules")
+          .select("id, title, month_of_year, day_of_month, locations(code)")
+          .eq("company_id", companyId)
+          .eq("is_active", true)
+          .returns<
+            {
+              id: string;
+              title: string;
+              month_of_year: number | null;
+              day_of_month: number | null;
+              locations: { code: string } | null;
+            }[]
+          >()
+      : Promise.resolve({ data: null }),
   ]);
+
+  /*
+   * One dated list from two sources: what you wrote down for yourself, and
+   * the maintenance the building is due. They belong together because they
+   * answer the same question -- what is coming up that I should act on --
+   * and keeping them apart only means checking two places.
+   */
+  type Upcoming = {
+    key: string;
+    date: string;
+    time: string | null;
+    title: string;
+    note: string;
+    href: string;
+    kind: "personal" | "maintenance";
+  };
+
+  const upcomingItems: Upcoming[] = [
+    ...(myReminders ?? []).map((reminder) => ({
+      key: `event-${reminder.id}`,
+      date: reminder.event_date,
+      time: reminder.event_time,
+      title: reminder.title,
+      note: "Your reminder",
+      href: `/calendar/${reminder.id}`,
+      kind: "personal" as const,
+    })),
+    ...(dueSchedules ?? []).flatMap((schedule) => {
+      const date = nextScheduledDate(schedule, today);
+      // A schedule with no month names no date, and the horizon is the same
+      // month ahead the reminders use.
+      if (!date || date > reminderHorizon) return [];
+      return [
+        {
+          key: `sched-${schedule.id}`,
+          date,
+          time: null,
+          title: schedule.title,
+          note: `Scheduled maintenance${
+            schedule.locations?.code ? ` · ${schedule.locations.code}` : ""
+          }`,
+          href: "/maintenance/schedules",
+          kind: "maintenance" as const,
+        },
+      ];
+    }),
+  ]
+    .sort(
+      (a, b) =>
+        a.date.localeCompare(b.date) ||
+        (a.time ?? "").localeCompare(b.time ?? ""),
+    )
+    .slice(0, 8);
+
+  const upcomingOverdue = upcomingItems.filter(
+    (item) => item.date < today,
+  ).length;
 
   // The cheque panel counts every live cheque, not just the imminent ones the
   // notification query narrows to.
@@ -325,12 +458,66 @@ export default async function DashboardPage({
     (row) => row.contracts?.status === "active",
   );
 
+  /*
+   * Overdue is counted by tenant rather than by invoice, and stands on its own
+   * tile: it is the one figure somebody chases, and three invoices against one
+   * tenant is one conversation, not three. Left inside "needs attention" it
+   * was a number nobody could act on without opening it first.
+   */
+  const overdueTenants = new Map<string, { name: string; balance: number }>();
+  for (const invoice of overdue) {
+    const held = overdueTenants.get(invoice.tenant_id) ?? {
+      name: invoice.tenants?.company_name ?? "Unknown tenant",
+      balance: 0,
+    };
+    held.balance += invoice.balance;
+    overdueTenants.set(invoice.tenant_id, held);
+  }
+  const overdueValue = overdue.reduce((sum, invoice) => sum + invoice.balance, 0);
+
+  // The tile counts what it names; the panel also lists the overdue, which
+  // now have a tile of their own but still belong in one place to read.
   const notificationCount =
-    overdue.length +
     dueSoon.length +
     renewals.length +
     escalationsDue.length +
     (cheques?.length ?? 0);
+  const panelCount = notificationCount + overdue.length;
+
+  /*
+   * What is sitting in the queue waiting on this reader.
+   *
+   * Approving is the one job nobody is prompted to do: the request is raised
+   * somewhere else, by somebody else, and until it is signed off the thing it
+   * describes has not happened. Counting only the modules this reader can
+   * actually approve keeps it a call to act rather than a number they can do
+   * nothing about.
+   */
+  const canApproveAny = Object.values(permissions).some((entry) => entry.approve);
+  const { data: queued } = canApproveAny
+    ? await supabase
+        .from("approval_requests")
+        .select("module_key")
+        .eq("company_id", companyId)
+        .eq("status", "pending")
+        .limit(200)
+        .returns<{ module_key: string }[]>()
+    : { data: [] };
+  const awaitingMe = (queued ?? []).filter((row) =>
+    can(permissions, row.module_key, "approve"),
+  ).length;
+
+  // Where this reader dragged things to, laid over the built-in order. A
+  // missing row simply means they have never moved anything.
+  const { data: layout } = await supabase
+    .from("dashboard_layouts")
+    .select("panels, tiles")
+    .eq("user_id", context.userId)
+    .eq("company_id", companyId)
+    .maybeSingle<{ panels: string[]; tiles: string[] }>();
+
+  const panelOrder = applyOrder(PANEL_KEYS, layout?.panels);
+  const tileOrder = applyOrder(TILE_KEYS, layout?.tiles);
 
   /**
    * The same reconciliation the table shows, shaped for the chart.
@@ -383,15 +570,16 @@ export default async function DashboardPage({
         description="Occupancy, receivables and what needs attention this week."
       />
 
-      {/* Which panels a role sees is set per role, so somebody granted none
-          lands here on an empty page. Say so rather than show nothing. */}
+      {/* Which company panels a role sees is set per role. Somebody granted
+          none still has their own reminders below, so say what is missing
+          rather than claim the page is empty. */}
       {!seesAnyPanel ? (
-        <Card title="Nothing on your dashboard yet">
+        <Card title="Only your own reminders here">
           <p className="text-sm muted">
-            Your role does not include any dashboard panels. An administrator
-            can grant them under Administration → Roles &amp; permissions, in
-            the Dashboard group — occupancy, income, utility usage and the
-            notifications panel are each granted separately.
+            Your role does not include any company dashboard panels. An
+            administrator can grant them under Administration → Roles &amp;
+            permissions, in the Dashboard group — occupancy, income, utility
+            usage and the notifications panel are each granted separately.
           </p>
         </Card>
       ) : null}
@@ -423,52 +611,148 @@ export default async function DashboardPage({
         </div>
       ) : null}
 
-      {seeOccupancy ? (
-        <div className="mb-6">
-          <Card title="Occupancy" description="Let against vacant, across every location.">
-            <OccupancyDonut occupied={totalOccupied} vacant={totalVacant} />
-          </Card>
-        </div>
-      ) : null}
+      <SortableDashboard
+        tileOrder={tileOrder}
+        panelOrder={panelOrder}
+        defaultTileOrder={[...TILE_KEYS]}
+        defaultPanelOrder={[...PANEL_KEYS]}
+        labels={LAYOUT_LABELS}
+        saveAction={saveDashboardLayout}
+        resetAction={resetDashboardLayout}
+        tiles={{
+          collected: seeIncome ? (
+            <StatTile
+              label="Collected this month"
+              value={money(collected)}
+              hint="Posted payments"
+              tone="money"
+              href="/reports/collections"
+            />
+          ) : null,
+          receivables: can(permissions, MODULE.billingInvoices, "view") ? (
+            <StatTile
+              label="Receivables"
+              value={money(receivables)}
+              hint={`${withBalance.length} open invoice(s)`}
+              href="/reports/receivables"
+            />
+          ) : null,
+          attention: seeNotifications ? (
+            <StatTile
+              label="Needs attention"
+              value={notificationCount}
+              hint="Due soon, renewals, rent rises, cheques"
+              href={showAttention ? "/dashboard" : "/dashboard?view=attention"}
+            />
+          ) : null,
+          /*
+           * Counted by tenant, valued by what they owe. One tenant three
+           * invoices behind is one account to chase, not three, and the money
+           * is the figure the conversation is actually about.
+           */
+          overdue: can(permissions, MODULE.billingInvoices, "view") ? (
+            <StatTile
+              label="Overdue accounts"
+              value={overdueTenants.size}
+              hint={
+                overdueTenants.size === 0
+                  ? "Nobody is behind"
+                  : `${money(overdueValue)} across ${overdue.length} invoice${
+                      overdue.length === 1 ? "" : "s"
+                    }`
+              }
+              tone={overdueTenants.size > 0 ? "money" : "default"}
+              href="/reports/receivables"
+            />
+          ) : null,
+          approvals: canApproveAny ? (
+            <StatTile
+              label="Awaiting your approval"
+              value={awaitingMe}
+              hint={
+                awaitingMe > 0
+                  ? "Nothing here has taken effect until it is signed off"
+                  : "Nothing is waiting on you"
+              }
+              href="/approvals"
+            />
+          ) : null,
+        }}
+        panels={{
+          "my-calendar": (
+            <Card
+              title="Coming up"
+              description={
+                upcomingItems.length > 0
+                  ? `${upcomingOverdue} overdue · next ${REMINDER_HORIZON_DAYS} days`
+                  : "Your reminders and the maintenance the building is due."
+              }
+              bodyClassName=""
+            >
+              {upcomingItems.length > 0 ? (
+                <div className="table-scroll">
+                  <table className="table">
+                    <tbody>
+                      {upcomingItems.map((item) => (
+                        <tr key={item.key}>
+                          <td className="text-xs" style={{ width: "9rem" }}>
+                            {formatDate(item.date)}
+                            {formatTime(item.time) ? (
+                              <p className="muted">{formatTime(item.time)}</p>
+                            ) : null}
+                            {item.date < today ? (
+                              <p style={{ color: "var(--danger)" }}>overdue</p>
+                            ) : null}
+                          </td>
+                          <td>
+                            <Link
+                              href={item.href}
+                              className="text-sm"
+                              style={{ color: "var(--color-brand-600)" }}
+                            >
+                              {item.title}
+                            </Link>
+                            <p className="text-xs muted">{item.note}</p>
+                          </td>
+                          <td className="text-right">
+                            <span className="badge">{item.kind}</span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div className="card-body">
+                  <EmptyState>
+                    Nothing due in the next {REMINDER_HORIZON_DAYS} days.
+                  </EmptyState>
+                </div>
+              )}
+              <div className="card-body">
+                <Link href="/calendar" className="btn btn-secondary btn-sm">
+                  Open your calendar
+                </Link>
+              </div>
+            </Card>
+          ),
+          occupancy: seeOccupancy ? (
+            <Card
+              title="Occupancy"
+              description="Let against vacant, across every location."
+            >
+              <OccupancyDonut occupied={totalOccupied} vacant={totalVacant} />
+            </Card>
+          ) : null,
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 mb-6">
-        {seeIncome ? (
-          <StatTile
-            label="Collected this month"
-            value={money(collected)}
-            hint="Posted payments"
-            tone="money"
-            href="/reports/collections"
-          />
-        ) : null}
-        {can(permissions, MODULE.billingInvoices, "view") ? (
-          <StatTile
-            label="Receivables"
-            value={money(receivables)}
-            hint={`${withBalance.length} open invoice(s)`}
-            href="/reports/receivables"
-          />
-        ) : null}
-        {seeNotifications ? (
-          <StatTile
-            label="Needs attention"
-            value={notificationCount}
-            hint="Overdue, due soon, renewals, rent rises, cheques"
-            href={
-              showAttention ? "/dashboard" : "/dashboard?view=attention"
-            }
-          />
-        ) : null}
-      </div>
-
-      {seeNotifications && showAttention ? (
-        <div className="mb-6">
-          <Card
+          notifications:
+            seeNotifications && showAttention ? (
+              <Card
             title="Notifications"
             description="Overdue and near-due billings, contracts approaching renewal, and cheques nearing maturity."
             bodyClassName=""
           >
-            {notificationCount > 0 ? (
+            {panelCount > 0 ? (
               <div className="table-scroll">
                 <table className="table">
                   <tbody>
@@ -654,12 +938,10 @@ export default async function DashboardPage({
             ) : (
               <EmptyState>Nothing needs attention right now.</EmptyState>
             )}
-          </Card>
-        </div>
-      ) : null}
+              </Card>
+            ) : null,
 
-      <div className="grid gap-4 lg:grid-cols-2">
-        {seeOccupancy ? (
+          "occupancy-by-location": seeOccupancy ? (
           <Card title="Occupancy per location" bodyClassName="">
             {occupancyRows.length > 0 ? (
               <div className="table-scroll">
@@ -704,9 +986,9 @@ export default async function DashboardPage({
               <EmptyState>No locations yet.</EmptyState>
             )}
           </Card>
-        ) : null}
+          ) : null,
 
-        {seeCheques ? (
+          "postdated-cheques": seeCheques ? (
           <Card
             title="Postdated cheques"
             description="Cheques held on file, their maturity dates and where each one has got to."
@@ -744,9 +1026,9 @@ export default async function DashboardPage({
               />
             </div>
           </Card>
-        ) : null}
+          ) : null,
 
-        {seeUtilities ? (
+          "utility-usage": seeUtilities ? (
           <Card
             title="Utility usage"
             description="Provider consumption against what the sub-meters account for."
@@ -780,10 +1062,14 @@ export default async function DashboardPage({
                         Number(period.provider_consumption),
                         tenantTotal,
                       );
-                      const rate = derivedRate(
-                        Number(period.provider_amount),
-                        Number(period.provider_consumption),
-                      );
+                      const rate = effectiveRate({
+                        providerAmount: Number(period.provider_amount),
+                        providerConsumption: Number(period.provider_consumption),
+                        manualRate:
+                          period.manual_rate === null
+                            ? null
+                            : Number(period.manual_rate),
+                      });
                       return (
                         <tr key={period.id}>
                           <td className="text-xs">
@@ -824,9 +1110,9 @@ export default async function DashboardPage({
               <EmptyState>No utility periods recorded yet.</EmptyState>
             )}
           </Card>
-        ) : null}
-
-      </div>
+          ) : null,
+        }}
+      />
     </>
   );
 }

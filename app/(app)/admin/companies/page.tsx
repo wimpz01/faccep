@@ -17,6 +17,7 @@ type CompanyRow = {
   legal_name: string | null;
   tin: string | null;
   address: string | null;
+  zip_code: string | null;
   contact_person: string | null;
   contact_number: string | null;
   email: string | null;
@@ -43,7 +44,7 @@ export default async function CompaniesPage() {
   const { data: companies } = await supabase
     .from("companies")
     .select(
-      "id, name, legal_name, tin, address, contact_person, contact_number, email, is_active",
+      "id, name, legal_name, tin, address, zip_code, contact_person, contact_number, email, is_active",
     )
     .order("name")
     .returns<CompanyRow[]>();

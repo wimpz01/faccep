@@ -1,4 +1,4 @@
-/**
+﻿/**
  * End-to-end check of the permission model against the live database.
  *
  *   node scripts/db-verify.mjs
@@ -200,8 +200,21 @@ async function main() {
   await db.query(`
     insert into public.locations (company_id, code, name)
     values (${lit(alpha)}, 'A1', 'Alpha building'),
+           (${lit(alpha)}, 'A2', 'Alpha annexe'),
            (${lit(beta)},  'B1', 'Beta building');
   `);
+
+  // Letters are handed out by the database, lowest free first, per company.
+  const letters = await db.query(`
+    select code, invoice_prefix from public.locations
+     where company_id in (${lit(alpha)}, ${lit(beta)})
+     order by company_id, created_at, id;
+  `);
+  check(
+    "a new location is given the next free letter without being told",
+    letters.map((row) => `${row.code}=${row.invoice_prefix}`).sort().join(","),
+    "A1=A,A2=B,B1=A",
+  );
 
   console.log("\nPrecedence: role");
   check("role grant -> view", await perm(regular, alpha, "billing.invoices", "view"), true);
@@ -237,7 +250,8 @@ async function main() {
     regular,
     "select coalesce(string_agg(distinct code, ',' order by code), '') as codes from public.locations;",
   );
-  check("sees only its own company's locations", visible[0].codes, "A1");
+  // Both of alpha's, and neither of beta's.
+  check("sees only its own company's locations", visible[0].codes, "A1,A2");
 
   const superSees = await asUser(
     superAdmin,
@@ -249,6 +263,7 @@ async function main() {
     "cannot create a location without admin.locations edit",
     await expectFailAsUser(
       regular,
+      // The letter fills itself in, so a refusal can only be the permission.
       `insert into public.locations (company_id, code, name) values (${lit(alpha)}, 'X9', 'nope');`,
     ),
     "blocked",
@@ -399,11 +414,13 @@ async function main() {
     `)
   )[0].id;
 
+  // tax_treatment is the input now; is_vatable is derived from what was charged.
   await db.query(`
     insert into public.invoice_lines
-      (invoice_id, line_kind, description, quantity, unit_price, amount, is_vatable)
-    values (${lit(invoiceId)}, 'rent', 'Rent', 1, 10000, 10000, true),
-           (${lit(invoiceId)}, 'water', 'Water', 1, 500, 500, false);
+      (invoice_id, line_kind, description, quantity, unit_price, amount,
+       tax_treatment, vat_mode)
+    values (${lit(invoiceId)}, 'rent', 'Rent', 1, 10000, 10000, 'vatable', 'exclusive'),
+           (${lit(invoiceId)}, 'water', 'Water', 1, 500, 500, 'non_vat', null);
   `);
 
   const totals = await db.query(
@@ -514,7 +531,7 @@ async function main() {
     await db.query(`
       insert into public.utility_periods
         (company_id, location_id, utility, period_start, period_end,
-         provider_amount, provider_consumption, genset_expense)
+         provider_amount, provider_consumption, extra_expense)
       values (${lit(alpha)}, ${lit(locationId)}, 'electric', '2026-03-01', '2026-03-31',
               50000, 5000, 10000)
       returning id;
@@ -542,6 +559,48 @@ async function main() {
       `update public.meter_readings set present_reading = 50 where period_id = ${lit(periodId)};`,
     ),
     "blocked",
+  );
+
+  // A rate set by hand is what tenants are charged, so the unmetered use --
+  // corridors, pumps, line loss -- is recovered rather than absorbed.
+  await db.query(
+    `update public.utility_periods set manual_rate = 11.2 where id = ${lit(periodId)};`,
+  );
+  const overridden = await db.query(
+    `select public.utility_period_rate(${lit(periodId)}) as rate;`,
+  );
+  check("a rate set by hand overrides the derived one", Number(overridden[0].rate), 11.2);
+
+  // Nought is a real rate, not an absent one: it must not fall back to 10.
+  await db.query(
+    `update public.utility_periods set manual_rate = 0 where id = ${lit(periodId)};`,
+  );
+  const zeroed = await db.query(
+    `select public.utility_period_rate(${lit(periodId)}) as rate;`,
+  );
+  check("a rate of nought is charged, not treated as unset", Number(zeroed[0].rate), 0);
+
+  await db.query(
+    `update public.utility_periods set manual_rate = null where id = ${lit(periodId)};`,
+  );
+  const cleared = await db.query(
+    `select public.utility_period_rate(${lit(periodId)}) as rate;`,
+  );
+  check("clearing the rate returns to the derived one", Number(cleared[0].rate), 10);
+
+  // Once invoices are out, the rate they were billed at cannot move under them.
+  await db.query(
+    `update public.utility_periods set is_locked = true where id = ${lit(periodId)};`,
+  );
+  check(
+    "a locked period refuses a change of rate",
+    await expectFail(
+      `update public.utility_periods set manual_rate = 12 where id = ${lit(periodId)};`,
+    ),
+    "blocked",
+  );
+  await db.query(
+    `update public.utility_periods set is_locked = false where id = ${lit(periodId)};`,
   );
 
   console.log("\nPhase 5: inventory, tools, maintenance");
@@ -800,9 +859,10 @@ async function main() {
 
   await db.query(`
     insert into public.invoice_lines
-      (invoice_id, line_kind, description, quantity, unit_price, amount, is_vatable)
-    values (${lit(autoInvoice)}, 'rent', 'Rent', 1, 20000, 20000, true),
-           (${lit(autoInvoice)}, 'electricity', 'Power', 1, 5000, 5000, false);
+      (invoice_id, line_kind, description, quantity, unit_price, amount,
+       tax_treatment, vat_mode)
+    values (${lit(autoInvoice)}, 'rent', 'Rent', 1, 20000, 20000, 'vatable', 'exclusive'),
+           (${lit(autoInvoice)}, 'electricity', 'Power', 1, 5000, 5000, 'non_vat', null);
   `);
 
   async function balanceOf(code) {
@@ -1431,11 +1491,24 @@ async function main() {
 
   const depositBefore = await balanceOf("2200");
 
+  // A deposit belongs to a contract, so the fixture needs one to hang off.
+  const depositContract = (
+    await db.query(`
+      insert into public.contracts
+        (company_id, tenant_id, contract_no, start_date, end_date,
+         monthly_rent, security_deposit, advance_payment, status)
+      values (${lit(alpha)}, ${lit(autoTenant)}, ${lit(`${TEST_TAG}-DEPC`)},
+              '2026-01-01', '2027-12-31', 20000, 40000, 0, 'active')
+      returning id;
+    `)
+  )[0].id;
+
   await db.query(`
     insert into public.payments
-      (company_id, tenant_id, payment_no, payment_kind, payment_date, amount)
-    values (${lit(alpha)}, ${lit(autoTenant)}, ${lit(`${TEST_TAG}-DEP`)},
-            'deposit', '2026-05-20', 40000);
+      (company_id, tenant_id, contract_id, payment_no, payment_kind,
+       payment_date, amount)
+    values (${lit(alpha)}, ${lit(autoTenant)}, ${lit(depositContract)},
+            ${lit(`${TEST_TAG}-DEP`)}, 'deposit', '2026-05-20', 40000);
   `);
   check(
     "a deposit received credits the liability",
@@ -1443,16 +1516,53 @@ async function main() {
     40000,
   );
 
+  /*
+   * A refund now comes out of an approved settlement, so the settlement is
+   * what decides the refundable figure. Keeping 25,000 leaves 15,000 to give
+   * back, which is the refund this phase has always tested.
+   */
+  const partSettlement = (
+    await db.query(`
+      insert into public.deposit_settlements (company_id, contract_id, settled_on)
+      values (${lit(alpha)}, ${lit(depositContract)}, '2026-05-25')
+      returning id;
+    `)
+  )[0].id;
+  await db.query(`
+    insert into public.deposit_settlement_lines
+      (settlement_id, kind, description, amount)
+    values (${lit(partSettlement)}, 'deduction', 'Made good on the unit', 25000);
+  `);
+  /*
+   * Approval is permission-gated and the harness runs with no signed-in user,
+   * so it is called as somebody entitled to approve. That the gate refuses an
+   * unauthenticated caller is the point of it, not an obstacle to work around.
+   */
+  const approveSettlement = async (settlementId) => {
+    const admin = (
+      await db.query(
+        `select id from public.profiles where is_super_admin limit 1;`,
+      )
+    )[0].id;
+    return asUserCommitted(
+      admin,
+      `select public.approve_deposit_settlement(${lit(settlementId)});`,
+    );
+  };
+
+  await approveSettlement(partSettlement);
+
   await db.query(`
     insert into public.payments
-      (company_id, tenant_id, payment_no, payment_kind, payment_date, amount)
-    values (${lit(alpha)}, ${lit(autoTenant)}, ${lit(`${TEST_TAG}-REF`)},
-            'refund', '2026-05-25', 15000);
+      (company_id, tenant_id, contract_id, payment_no, payment_kind,
+       payment_date, amount)
+    values (${lit(alpha)}, ${lit(autoTenant)}, ${lit(depositContract)},
+            ${lit(`${TEST_TAG}-REF`)}, 'refund', '2026-05-25', 15000);
   `);
   check(
-    "refunding part of it debits the same liability",
+    "settling and then refunding clears the liability entirely",
     (await balanceOf("2200")) - depositBefore,
-    25000,
+    0,
   );
 
   const depositPayment = (
@@ -1760,6 +1870,33 @@ async function main() {
    * derived from what has been drawn rather than typed, and the database
    * refuses to give up more than was taken.
    */
+  /**
+   * A counter behind its own table hands out a number that is already taken.
+   * That is exactly what broke voucher releases: journal entries were
+   * numbered by scanning the highest one until 0024 moved them onto the
+   * shared counter, which nobody seeded, so it began reissuing numbers the
+   * ledger already held.
+   */
+  console.log("\nDocument numbers cannot be issued twice");
+
+  const behindCounters = await db.query(`
+    select je.company_id
+      from public.journal_entries je
+      left join public.document_counters dc
+        on dc.doc_type = 'journal_entry'
+       and dc.company_id = je.company_id
+       and dc.year = extract(year from je.entry_date)::integer
+     where je.entry_no ~ '-[0-9]+$'
+     group by je.company_id
+    having max((regexp_replace(je.entry_no, '^.*-', ''))::int)
+             > coalesce(max(dc.last_value), 0);
+  `);
+  check(
+    "no journal counter sits behind the entries it numbers",
+    behindCounters.length,
+    0,
+  );
+
   console.log("\nDeposit and advance drawdowns");
 
   const fundContract = (
@@ -1774,6 +1911,19 @@ async function main() {
     `)
   )[0].id;
 
+  /*
+   * A deposit is held only once it has been receipted, so the fixture banks it
+   * before asking what is held. Agreeing a deposit on the contract and never
+   * collecting it is its own case, covered further down.
+   */
+  await db.query(`
+    insert into public.payments
+      (company_id, tenant_id, contract_id, payment_no, payment_kind,
+       payment_date, amount)
+    values (${lit(alpha)}, ${lit(billTenant)}, ${lit(fundContract)},
+            ${lit(`${TEST_TAG}-FUNDDEP`)}, 'deposit', '2026-01-05', 40000);
+  `);
+
   const fundState = async () =>
     (
       await db.query(`
@@ -1783,7 +1933,7 @@ async function main() {
     )[0];
 
   check(
-    "an untouched deposit reads as held in full",
+    "a receipted deposit reads as held in full",
     [Number((await fundState()).deposit_remaining), (await fundState()).deposit_status],
     [40000, "held"],
   );
@@ -1913,6 +2063,1066 @@ async function main() {
       where id = ${lit(voidPayment)} and status = 'voided';`,
   );
   check("an approver can apply the void they signed off", applied[0].n, 1);
+
+  console.log("\nCancelling a purchase order that is still open");
+
+  /** An order in whatever state the rule under test needs, with one line. */
+  async function orderAt(status, tag) {
+    const po = (
+      await db.query(`
+        insert into public.purchase_orders
+          (company_id, vendor_id, po_no, status, order_date)
+        values (${lit(alpha)}, ${lit(autoVendor)}, ${lit(`${TEST_TAG}-${tag}`)},
+                'draft', '2026-05-02')
+        returning id;
+      `)
+    )[0].id;
+    await db.query(`
+      insert into public.purchase_order_lines
+        (po_id, item_id, description, quantity, unit_price, amount)
+      values (${lit(po)}, ${lit(itemId)}, 'Cable', 10, 100, 1000);
+    `);
+    if (status !== "draft") {
+      await db.query(
+        `update public.purchase_orders set status = ${lit(status)} where id = ${lit(po)};`,
+      );
+    }
+    return po;
+  }
+
+  const cancelSql = (po) =>
+    `update public.purchase_orders set status = 'cancelled' where id = ${lit(po)};`;
+
+  check(
+    "an issued order can be withdrawn without unissuing it first",
+    await expectFail(cancelSql(await orderAt("issued", "CANC1"))),
+    "allowed",
+  );
+  check(
+    "a part-delivered order can have its balance closed",
+    await expectFail(cancelSql(await orderAt("partially_received", "CANC2"))),
+    "allowed",
+  );
+  check(
+    "an order received in full cannot be cancelled",
+    await expectFail(cancelSql(await orderAt("received", "CANC3"))),
+    "blocked",
+  );
+
+  const reopen = await orderAt("issued", "CANC4");
+  await db.query(cancelSql(reopen));
+  check(
+    "a cancelled order cannot be reopened",
+    await expectFail(
+      `update public.purchase_orders set status = 'issued' where id = ${lit(reopen)};`,
+    ),
+    "blocked",
+  );
+
+  // Cancelling the balance must not disturb what already arrived, or the
+  // goods would drop out of stock and out of what can still be billed.
+  const shortClosed = await orderAt("issued", "CANC5");
+  const shortLine = (
+    await db.query(
+      `select id from public.purchase_order_lines where po_id = ${lit(shortClosed)};`,
+    )
+  )[0].id;
+  const shortReceipt = (
+    await db.query(`
+      insert into public.goods_receipts (company_id, po_id, receipt_no, received_date)
+      values (${lit(alpha)}, ${lit(shortClosed)}, ${lit(`${TEST_TAG}-GR-SC`)}, '2026-05-03')
+      returning id;
+    `)
+  )[0].id;
+  await db.query(`
+    insert into public.goods_receipt_lines (receipt_id, po_line_id, quantity)
+    values (${lit(shortReceipt)}, ${lit(shortLine)}, 4);
+  `);
+  await db.query(cancelSql(shortClosed));
+  const kept = await db.query(`
+    select l.quantity_received,
+           public.po_received_value(${lit(shortClosed)}) as billable
+      from public.purchase_order_lines l where l.id = ${lit(shortLine)};
+  `);
+  check(
+    "goods received before the cancellation stay received and billable",
+    [Number(kept[0].quantity_received), Number(kept[0].billable)],
+    [4, 400],
+  );
+
+  check(
+    "nothing can be received on a cancelled order",
+    await expectFail(`
+      insert into public.goods_receipt_lines (receipt_id, po_line_id, quantity)
+      values (${lit(shortReceipt)}, ${lit(shortLine)}, 1);
+    `),
+    "blocked",
+  );
+
+  console.log("\nVAT is settled per line, inclusive or exclusive");
+
+  /*
+   * The arithmetic the invoice has to agree with, exercised through the
+   * database rather than through the TypeScript that produces it: lines are
+   * inserted with their own net and VAT and the invoice must total them
+   * without applying VAT a second time.
+   */
+  const vatTenant = (
+    await db.query(`
+      insert into public.tenants (company_id, company_name, is_vatable)
+      values (${lit(alpha)}, ${lit(`${TEST_TAG}-vat`)}, true)
+      returning id;
+    `)
+  )[0].id;
+
+  const vatInvoice = (
+    await db.query(`
+      insert into public.invoices
+        (company_id, tenant_id, invoice_no, invoice_date, due_date,
+         is_vatable, vat_rate)
+      values (${lit(alpha)}, ${lit(vatTenant)}, ${lit(`${TEST_TAG}-VATINV`)},
+              '2026-04-01', '2026-04-10', true, 12)
+      returning id;
+    `)
+  )[0].id;
+
+  /**
+   * Adds a line giving only what a person would type -- amount, treatment,
+   * mode -- and reads back what the database worked out. Nothing here computes
+   * the answer it is checking.
+   */
+  const vatLine = async (kind, description, treatment, mode, amount) => {
+    const row = (
+      await db.query(`
+        insert into public.invoice_lines
+          (invoice_id, line_kind, description, quantity, unit_price, amount,
+           sort_order, tax_treatment, vat_mode)
+        values (${lit(vatInvoice)}, ${lit(kind)}, ${lit(description)}, 1,
+                ${amount}, ${amount}, 0, ${lit(treatment)},
+                ${treatment === "vatable" ? lit(mode) : "null"})
+        returning net_amount, vat_amount, line_total, vat_rate;
+      `)
+    )[0];
+    return {
+      net: Number(row.net_amount),
+      vat: Number(row.vat_amount),
+      total: Number(row.line_total),
+      rate: Number(row.vat_rate),
+    };
+  };
+
+  // Test 1 — VAT exclusive: 35,000 net, 4,200 VAT, 39,200 total.
+  const exclusive = await vatLine(
+    "rent",
+    "Exclusive rent",
+    "vatable",
+    "exclusive",
+    35000,
+  );
+  check(
+    "an exclusive item adds VAT on top",
+    [exclusive.net, exclusive.vat, exclusive.total],
+    [35000, 4200, 39200],
+  );
+
+  // Test 2 — VAT inclusive: 35,000 gross becomes 31,250 + 3,750.
+  const inclusive = await vatLine(
+    "parking",
+    "Inclusive parking",
+    "vatable",
+    "inclusive",
+    35000,
+  );
+  check(
+    "an inclusive item has its VAT taken out, not added",
+    [inclusive.net, inclusive.vat, inclusive.total],
+    [31250, 3750, 35000],
+  );
+
+  // Test 3 — no VAT at all.
+  const exempt = await vatLine(
+    "water",
+    "Exempt water",
+    "vat_exempt",
+    null,
+    35000,
+  );
+  check(
+    "an exempt item carries no VAT and totals what was entered",
+    [exempt.net, exempt.vat, exempt.total],
+    [35000, 0, 35000],
+  );
+
+  // Test 4 — the four together, each on its own terms.
+  await vatLine("electricity", "Non-VAT electricity", "non_vat", null, 5000);
+
+  const mixed = (
+    await db.query(`
+      select subtotal, vat_amount, total from public.invoices
+       where id = ${lit(vatInvoice)};
+    `)
+  )[0];
+  check(
+    "a mixed invoice totals each line on its own terms",
+    [Number(mixed.subtotal), Number(mixed.vat_amount), Number(mixed.total)],
+    [35000 + 31250 + 35000 + 5000, 4200 + 3750, 106250 + 7950],
+  );
+  check(
+    "and net plus VAT reconciles to the total exactly",
+    Number(mixed.subtotal) + Number(mixed.vat_amount),
+    Number(mixed.total),
+  );
+
+  // A tenant who is not VAT-registered cannot be charged output VAT.
+  const plainTenant = (
+    await db.query(`
+      insert into public.tenants (company_id, company_name, is_vatable)
+      values (${lit(alpha)}, ${lit(`${TEST_TAG}-novat`)}, false)
+      returning id;
+    `)
+  )[0].id;
+  const plainInvoice = (
+    await db.query(`
+      insert into public.invoices
+        (company_id, tenant_id, invoice_no, invoice_date, due_date, is_vatable)
+      values (${lit(alpha)}, ${lit(plainTenant)}, ${lit(`${TEST_TAG}-NOVATINV`)},
+              '2026-04-01', '2026-04-10', false)
+      returning id;
+    `)
+  )[0].id;
+  await db.query(`
+    insert into public.invoice_lines
+      (invoice_id, line_kind, description, quantity, unit_price, amount,
+       is_vatable, sort_order, tax_treatment, vat_mode, vat_rate,
+       net_amount, vat_amount, line_total)
+    values (${lit(plainInvoice)}, 'rent', 'Rent', 1, 35000, 35000, false, 0,
+            'non_vat', null, 0, 35000, 0, 35000);
+  `);
+  const plain = (
+    await db.query(
+      `select vat_amount, total from public.invoices where id = ${lit(plainInvoice)};`,
+    )
+  )[0];
+  check(
+    "a non-VAT tenant is charged no VAT",
+    [Number(plain.vat_amount), Number(plain.total)],
+    [0, 35000],
+  );
+
+  check(
+    "a VATable item must say whether it is inclusive or exclusive",
+    await expectFail(`
+      insert into public.contract_inclusions (contract_id, inclusion, amount, tax_treatment)
+      values (${lit(fundContract)}, 'parking', 1000, 'vatable');
+    `),
+    "blocked",
+  );
+  check(
+    "and an exempt item must not claim one",
+    await expectFail(`
+      insert into public.contract_inclusions
+        (contract_id, inclusion, amount, tax_treatment, vat_mode)
+      values (${lit(fundContract)}, 'security_guard', 1000, 'vat_exempt', 'inclusive');
+    `),
+    "blocked",
+  );
+
+  console.log("\nA security deposit is a receipt, not just a figure on the contract");
+
+  // Measured as a delta: earlier fixtures have already moved this account.
+  const heldBefore = await balanceOf("2200");
+
+  const depTenant = (
+    await db.query(`
+      insert into public.tenants (company_id, company_name, is_vatable)
+      values (${lit(alpha)}, ${lit(`${TEST_TAG}-dep`)}, false)
+      returning id;
+    `)
+  )[0].id;
+  const depContract = (
+    await db.query(`
+      insert into public.contracts
+        (company_id, tenant_id, contract_no, start_date, end_date,
+         monthly_rent, security_deposit, advance_payment, status)
+      values (${lit(alpha)}, ${lit(depTenant)}, ${lit(`${TEST_TAG}-DEPCT`)},
+              '2026-01-01', '2027-12-31', 10000, 20000, 10000, 'active')
+      returning id;
+    `)
+  )[0].id;
+
+  const depReceipt = (kind, amount, contract, tenant = depTenant) => `
+    insert into public.payments
+      (company_id, tenant_id, contract_id, payment_no, payment_kind,
+       payment_date, amount)
+    values (${lit(alpha)}, ${lit(tenant)}, ${contract},
+            ${lit(`${TEST_TAG}-${kind}-`)} || substr(md5(random()::text), 1, 8),
+            ${lit(kind)}, '2026-02-01', ${amount});`;
+
+  const depFundState = async () => {
+    const rows = await db.query(`
+      select deposit_taken, deposit_received, deposit_drawn,
+             deposit_remaining, deposit_status
+        from public.contract_fund_status where contract_id = ${lit(depContract)};
+    `);
+    return rows[0];
+  };
+
+  check(
+    "an agreed deposit with no receipt reads as not received",
+    [
+      Number((await depFundState()).deposit_taken),
+      Number((await depFundState()).deposit_received),
+      (await depFundState()).deposit_status,
+    ],
+    [20000, 0, "not_received"],
+  );
+  check(
+    "a deposit must name its contract",
+    await expectFail(depReceipt("deposit", 20000, "null")),
+    "blocked",
+  );
+  check(
+    "and that contract must belong to the same tenant",
+    await expectFail(depReceipt("deposit", 20000, lit(depContract), autoTenant)),
+    "blocked",
+  );
+  check(
+    "a deposit never received cannot be refunded",
+    await expectFail(depReceipt("refund", 20000, lit(depContract))),
+    "blocked",
+  );
+
+  await db.query(depReceipt("deposit", 20000, lit(depContract)));
+  const received = await depFundState();
+  check(
+    "recording the receipt is what makes it held",
+    [
+      Number(received.deposit_received),
+      Number(received.deposit_remaining),
+      received.deposit_status,
+    ],
+    [20000, 20000, "held"],
+  );
+  check(
+    "the deposit lands in Security Deposits Payable, not income",
+    (await balanceOf("2200")) - heldBefore,
+    20000,
+  );
+  check(
+    "refunding more than is held is refused",
+    await expectFail(depReceipt("refund", 25000, lit(depContract))),
+    "blocked",
+  );
+
+  /*
+   * Refunding the lot now means settling with nothing kept: an approved
+   * settlement is what releases the money, and one with no deduction lines
+   * leaves the whole deposit refundable.
+   */
+  const wholeSettlement = (
+    await db.query(`
+      insert into public.deposit_settlements (company_id, contract_id, settled_on)
+      values (${lit(alpha)}, ${lit(depContract)}, '2026-06-01')
+      returning id;
+    `)
+  )[0].id;
+  await approveSettlement(wholeSettlement);
+  check(
+    "a settlement keeping nothing leaves the whole deposit refundable",
+    Number(
+      (
+        await db.query(
+          `select refundable from public.deposit_settlement_totals
+            where settlement_id = ${lit(wholeSettlement)};`,
+        )
+      )[0].refundable,
+    ),
+    20000,
+  );
+
+  await db.query(depReceipt("refund", 20000, lit(depContract)));
+  const refunded = await depFundState();
+  check(
+    "refunding draws the contract down without anyone recording it twice",
+    [
+      Number(refunded.deposit_drawn),
+      Number(refunded.deposit_remaining),
+      refunded.deposit_status,
+    ],
+    [20000, 0, "refunded"],
+  );
+  check(
+    "and the liability is cleared",
+    (await balanceOf("2200")) - heldBefore,
+    0,
+  );
+
+  console.log("\nThe trial balance answers for the period it was asked about");
+
+  /*
+   * The range and the status both used to be written onto a join that could
+   * not narrow anything, so every statement returned the same figures for any
+   * dates and counted drafts as though they were posted.
+   */
+  const tbAccount = (
+    await db.query(
+      `select id from public.chart_of_accounts
+        where company_id = ${lit(alpha)} and code = '1010';`,
+    )
+  )[0].id;
+  const tbOther = (
+    await db.query(
+      `select id from public.chart_of_accounts
+        where company_id = ${lit(alpha)} and code = '4000';`,
+    )
+  )[0].id;
+
+  const balanceIn = async (from, to) => {
+    const rows = await db.query(`
+      select balance from public.trial_balance(${lit(alpha)}, ${lit(from)}, ${lit(to)})
+       where code = '1010';
+    `);
+    return Number(rows[0]?.balance ?? 0);
+  };
+
+  const openingCash = await balanceIn("2029-01-01", "2029-12-31");
+
+  await db.query(`
+    select public.post_journal(
+      ${lit(alpha)}, '2029-02-15', ${lit(`${TEST_TAG} in range`)},
+      'manual', gen_random_uuid(), 'test',
+      jsonb_build_array(
+        jsonb_build_object('account', ${lit(tbAccount)}, 'description', 'in',  'debit', 500, 'credit', 0),
+        jsonb_build_object('account', ${lit(tbOther)},   'description', 'in',  'debit', 0,   'credit', 500)));
+    select public.post_journal(
+      ${lit(alpha)}, '2030-02-15', ${lit(`${TEST_TAG} out of range`)},
+      'manual', gen_random_uuid(), 'test',
+      jsonb_build_array(
+        jsonb_build_object('account', ${lit(tbAccount)}, 'description', 'out', 'debit', 900, 'credit', 0),
+        jsonb_build_object('account', ${lit(tbOther)},   'description', 'out', 'debit', 0,   'credit', 900)));
+  `);
+
+  check(
+    "a period reports only the entries dated inside it",
+    (await balanceIn("2029-01-01", "2029-12-31")) - openingCash,
+    500,
+  );
+  check(
+    "and a wider period picks up both",
+    (await balanceIn("2029-01-01", "2030-12-31")) - openingCash,
+    1400,
+  );
+
+  // Reversing does not remove the original: both sides stay and cancel out.
+  await db.query(`
+    update public.journal_entries set status = 'reversed'
+     where company_id = ${lit(alpha)} and memo = ${lit(`${TEST_TAG} in range`)};
+  `);
+  check(
+    "a reversed entry stays in the ledger",
+    (await balanceIn("2029-01-01", "2029-12-31")) - openingCash,
+    500,
+  );
+
+  await db.query(`
+    update public.journal_entries set status = 'draft'
+     where company_id = ${lit(alpha)} and memo = ${lit(`${TEST_TAG} in range`)};
+  `);
+  check(
+    "a draft entry is not in the ledger at all",
+    (await balanceIn("2029-01-01", "2029-12-31")) - openingCash,
+    0,
+  );
+
+  const neverIssued = await orderAt("draft", "CANC6");
+  const draftLine = (
+    await db.query(
+      `select id from public.purchase_order_lines where po_id = ${lit(neverIssued)};`,
+    )
+  )[0].id;
+  const draftReceipt = (
+    await db.query(`
+      insert into public.goods_receipts (company_id, po_id, receipt_no, received_date)
+      values (${lit(alpha)}, ${lit(neverIssued)}, ${lit(`${TEST_TAG}-GR-DR`)}, '2026-05-03')
+      returning id;
+    `)
+  )[0].id;
+  check(
+    "nothing can be received on an order that never went out",
+    await expectFail(`
+      insert into public.goods_receipt_lines (receipt_id, po_line_id, quantity)
+      values (${lit(draftReceipt)}, ${lit(draftLine)}, 1);
+    `),
+    "blocked",
+  );
+
+  console.log("\nA security deposit is settled before it is refunded");
+
+  const setTenant = (
+    await db.query(`
+      insert into public.tenants (company_id, company_name)
+      values (${lit(alpha)}, ${lit(`${TEST_TAG}-settled`)})
+      returning id;
+    `)
+  )[0].id;
+
+  const setContract = (
+    await db.query(`
+      insert into public.contracts
+        (company_id, tenant_id, contract_no, start_date, end_date,
+         security_deposit, status)
+      values (${lit(alpha)}, ${lit(setTenant)}, ${lit(`${TEST_TAG}-C-SET`)},
+              '2026-01-01', '2026-12-31', 30000, 'active')
+      returning id;
+    `)
+  )[0].id;
+
+  const refundAttempt = async (amount) =>
+    expectFail(`
+      insert into public.payments
+        (company_id, tenant_id, contract_id, payment_kind, amount,
+         payment_date, payment_mode)
+      values (${lit(alpha)}, ${lit(setTenant)}, ${lit(setContract)}, 'refund',
+              ${amount}, '2026-07-01', 'cash');
+    `);
+
+  // The deposit is received first; nothing can be refunded before that.
+  await db.query(`
+    insert into public.payments
+      (company_id, tenant_id, contract_id, payment_kind, amount,
+       payment_date, payment_mode)
+    values (${lit(alpha)}, ${lit(setTenant)}, ${lit(setContract)}, 'deposit',
+            30000, '2026-01-05', 'cash');
+  `);
+
+  check(
+    "a refund with no settlement behind it is refused",
+    await refundAttempt(30000),
+    "blocked",
+  );
+
+  const settlement = (
+    await db.query(`
+      insert into public.deposit_settlements
+        (company_id, contract_id, settled_on)
+      values (${lit(alpha)}, ${lit(setContract)}, '2026-07-01')
+      returning id;
+    `)
+  )[0].id;
+
+  check(
+    "a draft settlement alone still does not release a refund",
+    await refundAttempt(30000),
+    "blocked",
+  );
+
+  // Two deductions and a forfeiture: 8,000 of repairs, 2,000 forfeited.
+  await db.query(`
+    insert into public.deposit_settlement_lines
+      (settlement_id, kind, description, amount)
+    values (${lit(settlement)}, 'deduction', 'Repair to shopfront glass', 8000),
+           (${lit(settlement)}, 'forfeiture', 'Kept under clause 12', 2000);
+  `);
+
+  check(
+    "the settlement works out what is left to give back",
+    Number(
+      (
+        await db.query(
+          `select refundable from public.deposit_settlement_totals
+            where settlement_id = ${lit(settlement)};`,
+        )
+      )[0].refundable,
+    ),
+    // deposit_held is only stamped on approval, so a draft reads -10,000:
+    // what is kept, against a held figure not yet taken.
+    -10000,
+  );
+
+  // Measured as deltas: earlier fixtures have already moved these accounts.
+  const settlementBalance = async (code) =>
+    Number(
+      (
+        await db.query(`
+          select balance from public.trial_balance(
+            ${lit(alpha)}, '2026-01-01', '2026-12-31')
+           where code = ${lit(code)};
+        `)
+      )[0]?.balance ?? 0,
+    );
+  const beforeSettling = {
+    deposits: await settlementBalance("2200"),
+    repairs: await settlementBalance("5100"),
+    otherIncome: await settlementBalance("4900"),
+  };
+
+  await approveSettlement(settlement);
+
+  const approved = (
+    await db.query(`
+      select s.status, s.deposit_held, t.deductions, t.forfeited, t.refundable
+        from public.deposit_settlements s
+        join public.deposit_settlement_totals t on t.settlement_id = s.id
+       where s.id = ${lit(settlement)};
+    `)
+  )[0];
+
+  check("approving stamps what was held", Number(approved.deposit_held), 30000);
+  check("and leaves the right amount refundable", Number(approved.refundable), 20000);
+
+  check(
+    "an approved settlement can no longer be edited",
+    await expectFail(`
+      insert into public.deposit_settlement_lines
+        (settlement_id, kind, description, amount)
+      values (${lit(settlement)}, 'deduction', 'An afterthought', 500);
+    `),
+    "blocked",
+  );
+
+  const movedBy = async (code, was) =>
+    Math.round(((await settlementBalance(code)) - was) * 100) / 100;
+
+  /*
+   * trial_balance reports each account in its own normal direction: a
+   * liability and an income account read positive when credited, an expense
+   * when debited. So the deposit falling reads negative, income rising reads
+   * positive, and the repair cost being recovered reads negative.
+   */
+  check(
+    "the deposit liability falls by everything kept",
+    await movedBy("2200", beforeSettling.deposits),
+    -10000,
+  );
+  check(
+    "a repair deduction is a recovery against the repair cost, not income",
+    await movedBy("5100", beforeSettling.repairs),
+    -8000,
+  );
+  check(
+    "a forfeiture is income",
+    await movedBy("4900", beforeSettling.otherIncome),
+    2000,
+  );
+
+  check(
+    "refunding more than the settlement allows is refused",
+    await refundAttempt(25000),
+    "blocked",
+  );
+
+  await db.query(`
+    insert into public.payments
+      (company_id, tenant_id, contract_id, payment_kind, amount,
+       payment_date, payment_mode)
+    values (${lit(alpha)}, ${lit(setTenant)}, ${lit(setContract)}, 'refund',
+            20000, '2026-07-02', 'cash');
+  `);
+  check(
+    "and the refundable balance is paid out and the deposit cleared",
+    Number(
+      (
+        await db.query(
+          `select deposit_remaining from public.contract_fund_status
+            where contract_id = ${lit(setContract)};`,
+        )
+      )[0].deposit_remaining,
+    ),
+    0,
+  );
+  check(
+    "a second refund on a spent settlement is refused",
+    await refundAttempt(1),
+    "blocked",
+  );
+
+  /*
+   * Money out is a disbursement voucher, never an official receipt: handing a
+   * tenant an OR for money paid to them says the opposite of what happened.
+   */
+  check(
+    "a refund is numbered as a voucher, not a receipt",
+    (
+      await db.query(`
+        select payment_no from public.payments
+         where contract_id = ${lit(setContract)} and payment_kind = 'refund'
+         order by created_at desc limit 1;
+      `)
+    )[0].payment_no.slice(0, 3),
+    "DV-",
+  );
+  check(
+    "a collection is still an official receipt",
+    (
+      await db.query(`
+        insert into public.payments
+          (company_id, tenant_id, payment_kind, amount, payment_date, payment_mode)
+        values (${lit(alpha)}, ${lit(setTenant)}, 'prepayment', 500,
+                '2026-07-03', 'cash')
+        returning payment_no;
+      `)
+    )[0].payment_no.slice(0, 3),
+    "OR-",
+  );
+
+  /*
+   * An advance is refundable too, and has no settlement to answer to: there is
+   * nothing to deduct from it and nothing to forfeit.
+   */
+  await db.query(`
+    update public.contracts set advance_payment = 5000
+     where id = ${lit(setContract)};
+  `);
+  check(
+    "an advance can be refunded without a settlement",
+    (
+      await db.query(`
+        insert into public.payments
+          (company_id, tenant_id, contract_id, payment_kind, fund_kind, amount,
+           payment_date, payment_mode)
+        values (${lit(alpha)}, ${lit(setTenant)}, ${lit(setContract)}, 'refund',
+                'advance_payment', 5000, '2026-07-04', 'cash')
+        returning payment_no;
+      `)
+    )[0].payment_no.slice(0, 3),
+    "DV-",
+  );
+  check(
+    "and it draws down the advance, not the deposit",
+    Number(
+      (
+        await db.query(`
+          select advance_remaining from public.contract_fund_status
+           where contract_id = ${lit(setContract)};
+        `)
+      )[0].advance_remaining,
+    ),
+    0,
+  );
+  check(
+    "refunding more advance than is left is refused",
+    await expectFail(`
+      insert into public.payments
+        (company_id, tenant_id, contract_id, payment_kind, fund_kind, amount,
+         payment_date, payment_mode)
+      values (${lit(alpha)}, ${lit(setTenant)}, ${lit(setContract)}, 'refund',
+              'advance_payment', 1, '2026-07-05', 'cash');
+    `),
+    "blocked",
+  );
+  check(
+    "only a refund names a fund",
+    await expectFail(`
+      insert into public.payments
+        (company_id, tenant_id, payment_kind, fund_kind, amount,
+         payment_date, payment_mode)
+      values (${lit(alpha)}, ${lit(setTenant)}, 'prepayment', 'advance_payment',
+              100, '2026-07-06', 'cash');
+    `),
+    "blocked",
+  );
+
+  console.log("\nBilling is scoped to the properties chosen");
+
+  /*
+   * The generator narrows contracts by the property their units sit in. These
+   * assert the relation that narrowing rests on: a contract belongs to the
+   * property of its units and to no other, and asking for two properties
+   * returns both rather than everything.
+   */
+  const scopeA = (
+    await db.query(
+      `select id from public.locations where company_id = ${lit(alpha)} and code = 'A1';`,
+    )
+  )[0].id;
+  const scopeB = (
+    await db.query(
+      `select id from public.locations where company_id = ${lit(alpha)} and code = 'A2';`,
+    )
+  )[0].id;
+
+  const scopeUnitB = (
+    await db.query(`
+      insert into public.units (company_id, location_id, code, monthly_rate)
+      values (${lit(alpha)}, ${lit(scopeB)}, 'U-A2', 9000)
+      returning id;
+    `)
+  )[0].id;
+
+  const scopeTenant = (
+    await db.query(`
+      insert into public.tenants (company_id, company_name)
+      values (${lit(alpha)}, ${lit(`${TEST_TAG}-scoped`)})
+      returning id;
+    `)
+  )[0].id;
+
+  const scopeContractB = (
+    await db.query(`
+      insert into public.contracts
+        (company_id, tenant_id, contract_no, start_date, end_date, status)
+      values (${lit(alpha)}, ${lit(scopeTenant)}, ${lit(`${TEST_TAG}-C-A2`)},
+              '2026-01-01', '2026-12-31', 'active')
+      returning id;
+    `)
+  )[0].id;
+
+  await db.query(`
+    insert into public.contract_units (contract_id, unit_id)
+    values (${lit(scopeContractB)}, ${lit(scopeUnitB)});
+  `);
+
+  const contractsIn = async (locationIds) =>
+    (
+      await db.query(`
+        select count(distinct c.id)::int as n
+          from public.contracts c
+          join public.contract_units cu on cu.contract_id = c.id
+          join public.units u on u.id = cu.unit_id
+         where c.company_id = ${lit(alpha)}
+           and c.status = 'active'
+           and u.location_id in (${locationIds.map(lit).join(", ")});
+      `)
+    )[0].n;
+
+  const inA = await contractsIn([scopeA]);
+  const inB = await contractsIn([scopeB]);
+  const inBoth = await contractsIn([scopeA, scopeB]);
+
+  check("a property's contracts are only its own", inB, 1);
+  check(
+    "another property's contracts are not swept in",
+    inA === inBoth - inB,
+    true,
+  );
+  check("choosing both properties covers both", inBoth, inA + inB);
+  check(
+    "and choosing one never returns the other's",
+    await contractsIn([scopeB]),
+    1,
+  );
+
+  console.log("\nInvoices are numbered per property");
+
+  const locA = (
+    await db.query(
+      `select id from public.locations where company_id = ${lit(alpha)} and code = 'A1';`,
+    )
+  )[0].id;
+  const locB = (
+    await db.query(
+      `select id from public.locations where company_id = ${lit(alpha)} and code = 'A2';`,
+    )
+  )[0].id;
+
+  const numberTenant = (
+    await db.query(`
+      insert into public.tenants (company_id, company_name)
+      values (${lit(alpha)}, ${lit(`${TEST_TAG}-numbering`)})
+      returning id;
+    `)
+  )[0].id;
+
+  // invoice_no is left blank on purpose: the trigger is what is under test.
+  // The date is passed in because it is what drives both the YY and the reset.
+  const raise = async (locationId, on = "2026-06-01") =>
+    (
+      await db.query(`
+        insert into public.invoices
+          (company_id, tenant_id, location_id, invoice_date, due_date)
+        values (${lit(alpha)}, ${lit(numberTenant)},
+                ${locationId ? lit(locationId) : "null"},
+                ${lit(on)}, ${lit(on)})
+        returning invoice_no;
+      `)
+    )[0].invoice_no;
+
+  check("an invoice is numbered from its property's letter", await raise(locA), "A-26-00001");
+  check("and that property counts on by itself", await raise(locA), "A-26-00002");
+  check(
+    "a second property starts its own series at one",
+    await raise(locB),
+    "B-26-00001",
+  );
+  check(
+    "so both A-26-00001 and B-26-00001 exist at once",
+    (
+      await db.query(`
+        select count(*)::int as n from public.invoices
+         where company_id = ${lit(alpha)}
+           and invoice_no in ('A-26-00001', 'B-26-00001');
+      `)
+    )[0].n,
+    2,
+  );
+  check(
+    "counting one property does not touch the other",
+    await raise(locA),
+    "A-26-00003",
+  );
+
+  // The invoice_date drives the year, so a later billing date starts a new
+  // series rather than continuing the old one.
+  check(
+    "the new year restarts at one",
+    await raise(locA, "2027-01-04"),
+    "A-27-00001",
+  );
+  check(
+    "and the old year carries on where it left off",
+    await raise(locA, "2026-11-30"),
+    "A-26-00004",
+  );
+
+  check(
+    "an invoice naming no property keeps the company-wide series",
+    (await raise(null)).startsWith("INV-"),
+    true,
+  );
+
+  // A gap is the correct outcome: a number once issued is never reissued, or
+  // two different documents would answer to one reference.
+  const spent = await raise(locB);
+  await db.query(
+    `delete from public.invoices where invoice_no = ${lit(spent)} and company_id = ${lit(alpha)};`,
+  );
+  check(
+    "a deleted draft leaves a gap rather than freeing its number",
+    await raise(locB),
+    "B-26-00003",
+  );
+
+  /*
+   * Two writers at once. Both statements run inside one round trip, so the
+   * second increments the row the first has already touched: proof that the
+   * counter is read and written under a lock rather than read then written.
+   */
+  const together = await db.query(`
+    with two as (
+      insert into public.invoices
+        (company_id, tenant_id, location_id, invoice_date, due_date)
+      values (${lit(alpha)}, ${lit(numberTenant)}, ${lit(locA)}, '2026-06-01', '2026-06-01'),
+             (${lit(alpha)}, ${lit(numberTenant)}, ${lit(locA)}, '2026-06-01', '2026-06-01')
+      returning invoice_no
+    )
+    select count(distinct invoice_no)::int as distinct_numbers from two;
+  `);
+  check(
+    "two invoices raised together never share a number",
+    together[0].distinct_numbers,
+    2,
+  );
+
+  check(
+    "a number supplied by hand is left exactly as given",
+    (
+      await db.query(`
+        insert into public.invoices
+          (company_id, tenant_id, location_id, invoice_no, invoice_date, due_date)
+        values (${lit(alpha)}, ${lit(numberTenant)}, ${lit(locA)},
+                ${lit(`${TEST_TAG}-INV-LEGACY`)}, '2026-06-01', '2026-06-05')
+        returning invoice_no;
+      `)
+    )[0].invoice_no,
+    `${TEST_TAG}-INV-LEGACY`,
+  );
+
+  // The old series predates the letters and is not renumbered by any of this.
+  check(
+    "an INV- number from before the change is still there and still findable",
+    (
+      await db.query(`
+        select invoice_no from public.invoices
+         where company_id = ${lit(alpha)}
+           and lower(invoice_no) like '%inv1%';
+      `)
+    )[0].invoice_no,
+    `${TEST_TAG}-INV1`,
+  );
+  check(
+    "and the unique index holds across both formats",
+    await expectFail(`
+      insert into public.invoices
+        (company_id, tenant_id, location_id, invoice_no, invoice_date, due_date)
+      values (${lit(alpha)}, ${lit(numberTenant)}, ${lit(locA)},
+              'A-26-00001', '2026-06-01', '2026-06-05');
+    `),
+    "blocked",
+  );
+
+  check(
+    "two properties cannot share one letter",
+    await expectFail(`
+      update public.locations set invoice_prefix = 'A'
+       where id = ${lit(locB)};
+    `),
+    "blocked",
+  );
+  check(
+    "a letter longer than one character is refused",
+    await expectFail(`
+      update public.locations set invoice_prefix = 'AB'
+       where id = ${lit(locB)};
+    `),
+    "blocked",
+  );
+  check(
+    "a lower-case letter is tidied rather than refused",
+    (
+      await db.query(`
+        update public.locations set invoice_prefix = 'z'
+         where id = ${lit(locB)}
+        returning invoice_prefix;
+      `)
+    )[0].invoice_prefix,
+    "Z",
+  );
+  check(
+    "clearing the letter on an existing location keeps the one it has",
+    (
+      await db.query(`
+        update public.locations set invoice_prefix = ''
+         where id = ${lit(locB)}
+        returning invoice_prefix;
+      `)
+    )[0].invoice_prefix,
+    "Z",
+  );
+  // Put it back so the freed letter test below reads cleanly.
+  await db.query(
+    `update public.locations set invoice_prefix = 'B' where id = ${lit(locB)};`,
+  );
+
+  // Lowest free rather than highest+1: C is taken, freed, and taken again.
+  const thirdLocation = (
+    await db.query(`
+      insert into public.locations (company_id, code, name)
+      values (${lit(alpha)}, 'A3', ${lit(`${TEST_TAG}-third`)})
+      returning id, invoice_prefix;
+    `)
+  )[0];
+  check("a third location takes C", thirdLocation.invoice_prefix, "C");
+  await db.query(`delete from public.locations where id = ${lit(thirdLocation.id)};`);
+  check(
+    "and once C is free again the next location takes C, not D",
+    (
+      await db.query(`
+        insert into public.locations (company_id, code, name)
+        values (${lit(alpha)}, 'A4', ${lit(`${TEST_TAG}-fourth`)})
+        returning invoice_prefix;
+      `)
+    )[0].invoice_prefix,
+    "C",
+  );
+
+  check(
+    "the property an invoice was billed to cannot move once released",
+    await expectFail(`
+      update public.invoices set location_id = ${lit(locB)}
+       where invoice_no = ${lit(`${TEST_TAG}-INV1`)} and company_id = ${lit(alpha)};
+    `),
+    "blocked",
+  );
 }
 
 async function cleanup() {
@@ -1955,6 +3165,8 @@ async function cleanup() {
     await db.query(`delete from public.payments where company_id in ${scope};`);
     await db.query(`delete from public.invoices where company_id in ${scope};`);
     await db.query(`delete from public.utility_periods where company_id in ${scope};`);
+    // Holds the contract on delete restrict, so it goes first.
+    await db.query(`delete from public.deposit_settlements where company_id in ${scope};`);
     await db.query(`delete from public.contracts where company_id in ${scope};`);
     await db.query(`delete from public.units where company_id in ${scope};`);
     await db.query(`delete from public.locations where company_id in ${scope};`);
@@ -2000,3 +3212,4 @@ console.log(
   }`,
 );
 process.exit(failures.length ? 1 : 0);
+

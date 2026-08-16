@@ -244,3 +244,92 @@ export function TenantStatusForm({
     </form>
   );
 }
+
+/**
+ * Bringing an existing tenant list in from a spreadsheet.
+ *
+ * The file is read in the browser and sent as text, so there is no upload to
+ * store and nothing left behind if the import is refused. Pasting works just as
+ * well as choosing a file, which is what people actually do with a few rows.
+ */
+export function ImportTenantsForm({
+  action,
+}: {
+  action: (state: ActionState, formData: FormData) => Promise<ActionState>;
+}) {
+  const [state, formAction] = useActionState<ActionState, FormData>(action, {});
+  const [csv, setCsv] = useState("");
+  const [fileName, setFileName] = useState("");
+
+  const rowCount = csv
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean).length;
+
+  return (
+    <form action={formAction} className="flex flex-col gap-3">
+      <input type="hidden" name="csv" value={csv} />
+
+      <div className="flex items-end gap-3 flex-wrap">
+        <div>
+          <label className="label" htmlFor="tenant-import-file">
+            Spreadsheet (.csv)
+          </label>
+          <input
+            id="tenant-import-file"
+            type="file"
+            accept=".csv,text/csv"
+            className="input"
+            style={{ maxWidth: "20rem" }}
+            onChange={async (event) => {
+              const file = event.currentTarget.files?.[0];
+              if (!file) return;
+              setFileName(file.name);
+              setCsv(await file.text());
+            }}
+          />
+        </div>
+        <a href="/tenants/export?template=1" className="btn btn-secondary btn-sm">
+          Download template
+        </a>
+        <a href="/tenants/export" className="btn btn-secondary btn-sm">
+          Export what is on file
+        </a>
+      </div>
+
+      <div>
+        <label className="label" htmlFor="tenant-import-csv">
+          {fileName
+            ? `From ${fileName} — check it, then import`
+            : "Or paste the rows"}
+        </label>
+        <textarea
+          id="tenant-import-csv"
+          className="textarea"
+          rows={fileName ? 8 : 4}
+          placeholder={
+            "company_name,tin,is_vatable,address,contact_person,mobile_number,email\nSunrise Hardware Trading,004-231-889-000,yes,Ground floor BLDG-A,Melchor Ramos,0917 000 0000,melchor@example.com"
+          }
+          value={csv}
+          onChange={(event) => setCsv(event.currentTarget.value)}
+        />
+        <p className="text-xs muted mt-1">
+          First row is the header. <strong>company_name</strong> is the only
+          required column. Nothing is written unless every row is good, so a
+          typo on line 40 cannot leave 39 tenants half-imported.
+          {rowCount > 1 ? ` ${rowCount - 1} row(s) ready.` : ""}
+        </p>
+      </div>
+
+      <div className="flex items-center gap-3 flex-wrap">
+        <Submit label="Import tenants" />
+        <FormError message={state.error} />
+        {state.success ? (
+          <p className="text-sm" style={{ color: "var(--success)" }}>
+            {state.success}
+          </p>
+        ) : null}
+      </div>
+    </form>
+  );
+}

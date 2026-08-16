@@ -29,7 +29,9 @@ export const BILLING_TYPE_LABELS: Record<string, string> = Object.fromEntries(
 
 /** How a deposit or advance reads once it has been drawn on. */
 export const FUND_STATUS: Record<string, string> = {
-  none: "None taken",
+  none: "None agreed",
+  // Agreed at signing but no receipt has been recorded, so nothing is held.
+  not_received: "Not yet received",
   held: "Held",
   partially_applied: "Partially applied",
   fully_applied: "Fully applied",

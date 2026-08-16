@@ -3,7 +3,8 @@ import Link from "next/link";
 
 import { Card, EmptyState, PageHeader, StatTile } from "@/components/ui";
 import { requireSession } from "@/lib/auth";
-import { formatDate, monthsUntil } from "@/lib/format";
+import { formatDate, formatTime, monthsUntil } from "@/lib/format";
+import { nextScheduledDate } from "@/lib/maintenance";
 import { MODULE, can } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
 
@@ -15,6 +16,8 @@ export const metadata: Metadata = { title: "Calendar" };
 type Entry = {
   key: string;
   date: string;
+  /** Only personal reminders carry one; the rest are all-day. */
+  time?: string | null;
   title: string;
   detail: string;
   href?: string;
@@ -23,7 +26,12 @@ type Entry = {
   done?: boolean;
 };
 
-export default async function CalendarPage() {
+export default async function CalendarPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ view?: string }>;
+}) {
+  const { view } = await searchParams;
   const context = await requireSession();
   const companyId = context.activeCompany!.companyId;
   const permissions = context.permissions;
@@ -52,7 +60,7 @@ export default async function CalendarPage() {
       can(permissions, MODULE.maintenanceScheduled, "view")
         ? supabase
             .from("maintenance_schedules")
-            .select("id, title, month_of_year, locations(code)")
+            .select("id, title, month_of_year, day_of_month, locations(code)")
             .eq("company_id", companyId)
             .eq("is_active", true)
             .returns<
@@ -60,6 +68,7 @@ export default async function CalendarPage() {
                 id: string;
                 title: string;
                 month_of_year: number | null;
+                day_of_month: number | null;
                 locations: { code: string } | null;
               }[]
             >()
@@ -114,8 +123,10 @@ export default async function CalendarPage() {
     entries.push({
       key: `event-${event.id}`,
       date: event.event_date,
+      time: event.event_time,
       title: event.title,
-      detail: event.details ?? (event.event_time ? String(event.event_time) : ""),
+      detail: event.details ?? "",
+      href: `/calendar/${event.id}`,
       kind: "personal",
       eventId: event.id,
       done: event.is_done,
@@ -156,13 +167,14 @@ export default async function CalendarPage() {
     });
   }
 
-  // Scheduled maintenance has a month but no fixed day; anchor it to the first.
-  const year = new Date().getFullYear();
+  // A schedule recurs on a month and day rather than a date, so it is rolled
+  // forward to the next time it comes round.
   for (const schedule of schedules ?? []) {
-    if (!schedule.month_of_year) continue;
+    const date = nextScheduledDate(schedule, today);
+    if (!date) continue;
     entries.push({
       key: `sched-${schedule.id}`,
-      date: `${year}-${String(schedule.month_of_year).padStart(2, "0")}-01`,
+      date,
       title: schedule.title,
       detail: `Scheduled maintenance${schedule.locations?.code ? ` · ${schedule.locations.code}` : ""}`,
       href: "/maintenance/schedules",
@@ -172,9 +184,34 @@ export default async function CalendarPage() {
 
   const upcoming = entries
     .filter((entry) => !entry.done)
-    .sort((a, b) => a.date.localeCompare(b.date));
+    // Within a day, a timed reminder falls in its place; an all-day entry has
+    // no hour to sort on, so it leads.
+    .sort(
+      (a, b) =>
+        a.date.localeCompare(b.date) ||
+        (a.time ?? "").localeCompare(b.time ?? ""),
+    );
   const overdue = upcoming.filter((entry) => entry.date < today);
   const done = entries.filter((entry) => entry.done);
+
+  // The tiles are the filter. Clicking the one already applied clears it, so
+  // there is never a filtered list with no obvious way back.
+  const showing =
+    view === "overdue" || view === "mine" ? view : ("all" as const);
+  const listed =
+    showing === "overdue"
+      ? overdue
+      : showing === "mine"
+        ? upcoming.filter((entry) => entry.kind === "personal")
+        : upcoming;
+  const listTitle =
+    showing === "overdue"
+      ? "Overdue"
+      : showing === "mine"
+        ? "Your reminders"
+        : "Upcoming";
+  const tileHref = (target: "overdue" | "mine") =>
+    showing === target ? "/calendar" : `/calendar?view=${target}`;
 
   return (
     <>
@@ -184,12 +221,23 @@ export default async function CalendarPage() {
       />
 
       <div className="grid gap-4 sm:grid-cols-3 mb-6">
-        <StatTile label="Upcoming" value={upcoming.length} hint="Next six months" />
-        <StatTile label="Overdue" value={overdue.length} hint="Past their date" />
+        <StatTile
+          label="Upcoming"
+          value={upcoming.length}
+          hint="Next six months"
+          href={showing === "all" ? undefined : "/calendar"}
+        />
+        <StatTile
+          label="Overdue"
+          value={overdue.length}
+          hint="Past their date"
+          href={tileHref("overdue")}
+        />
         <StatTile
           label="Your reminders"
           value={(events ?? []).filter((event) => !event.is_done).length}
           hint="Personal entries"
+          href={tileHref("mine")}
         />
       </div>
 
@@ -203,8 +251,16 @@ export default async function CalendarPage() {
       </div>
 
       <div className="mb-6">
-        <Card title="Upcoming" bodyClassName="">
-          {upcoming.length > 0 ? (
+        <Card
+          title={listTitle}
+          description={
+            showing === "all"
+              ? undefined
+              : `Filtered — ${listed.length} of ${upcoming.length}. Click the tile again to show everything.`
+          }
+          bodyClassName=""
+        >
+          {listed.length > 0 ? (
             <div className="table-scroll">
               <table className="table">
                 <thead>
@@ -216,10 +272,13 @@ export default async function CalendarPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {upcoming.map((entry) => (
+                  {listed.map((entry) => (
                     <tr key={entry.key}>
                       <td className="text-xs">
                         {formatDate(entry.date)}
+                        {formatTime(entry.time) ? (
+                          <p className="muted">{formatTime(entry.time)}</p>
+                        ) : null}
                         {entry.date < today ? (
                           <p style={{ color: "var(--danger)" }}>overdue</p>
                         ) : null}
@@ -260,7 +319,13 @@ export default async function CalendarPage() {
               </table>
             </div>
           ) : (
-            <EmptyState>Nothing coming up.</EmptyState>
+            <EmptyState>
+              {showing === "overdue"
+                ? "Nothing is overdue."
+                : showing === "mine"
+                  ? "You have no reminders of your own."
+                  : "Nothing coming up."}
+            </EmptyState>
           )}
         </Card>
       </div>
@@ -274,8 +339,23 @@ export default async function CalendarPage() {
                   <tr key={entry.key}>
                     <td className="text-xs muted" style={{ width: "9rem" }}>
                       {formatDate(entry.date)}
+                      {formatTime(entry.time) ? (
+                        <p>{formatTime(entry.time)}</p>
+                      ) : null}
                     </td>
-                    <td className="text-sm muted">{entry.title}</td>
+                    <td className="text-sm">
+                      {entry.href ? (
+                        <Link
+                          href={entry.href}
+                          className="muted"
+                          style={{ textDecoration: "underline" }}
+                        >
+                          {entry.title}
+                        </Link>
+                      ) : (
+                        <span className="muted">{entry.title}</span>
+                      )}
+                    </td>
                     <td className="text-right">
                       <form action={toggleCalendarEvent}>
                         <input type="hidden" name="id" value={entry.eventId} />

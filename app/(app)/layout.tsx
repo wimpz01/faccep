@@ -18,15 +18,27 @@ export default async function AppLayout({
   const permissions = context.permissions;
 
   const groups: NavGroup[] = [];
+
+  // Everyone who can approve anything needs the queue; it self-filters per row.
+  const hasAnyApprove = Object.values(permissions).some((entry) => entry.approve);
+
   if (context.activeCompany) {
+    // The dashboard is where every session starts, so it is a link at the very
+    // top rather than a row inside a drawer that has to be opened first. A
+    // one-item group renders as the link itself.
     groups.push({
-      group: "Overview",
-      items: [
-        { href: "/dashboard", label: "Dashboard" },
-        // Available to everyone: it is where you change your own password.
-        { href: "/account", label: "My account" },
-      ],
+      group: "Dashboard",
+      items: [{ href: "/dashboard", label: "Dashboard" }],
     });
+
+    const overview: NavItem[] = [
+      // Available to everyone: it is where you change your own password.
+      { href: "/account", label: "My account" },
+    ];
+    if (hasAnyApprove) {
+      overview.push({ href: "/approvals", label: "Approvals" });
+    }
+    groups.push({ group: "Overview", items: overview });
   }
 
   const portfolio: NavItem[] = [];
@@ -44,6 +56,9 @@ export default async function AppLayout({
   if (can(permissions, MODULE.tenants, "view")) {
     portfolio.push({ href: "/tenants", label: "Tenants" });
   }
+  if (can(permissions, MODULE.tenants, "edit")) {
+    portfolio.push({ href: "/tenants/import", label: "Import tenants" });
+  }
   if (can(permissions, MODULE.contracts, "view")) {
     portfolio.push({ href: "/contracts", label: "Contracts" });
   }
@@ -60,6 +75,11 @@ export default async function AppLayout({
   }
   if (can(permissions, MODULE.payments, "view")) {
     billing.push({ href: "/payments", label: "Payments" });
+  }
+  // Sits with billing rather than with the lease: it is a transaction, and the
+  // cashier who pays the refund out needs to reach it.
+  if (can(permissions, MODULE.contractDeposits, "view")) {
+    billing.push({ href: "/deposits", label: "Deposit settlement" });
   }
   if (can(permissions, MODULE.paymentsPdc, "view")) {
     billing.push({ href: "/payments/pdc", label: "Postdated cheques" });
@@ -115,6 +135,20 @@ export default async function AppLayout({
   if (can(permissions, MODULE.purchasingOrders, "view")) {
     purchasing.push({ href: "/purchasing/orders", label: "Purchase orders" });
   }
+  // Receiving is done on the order itself, so it has no screen of its own.
+  // Without an entry here the module is invisible: someone granted Receiving
+  // opens the menu, finds nothing, and concludes they were not given it. The
+  // link lands on the orders still awaiting delivery -- the only ones goods
+  // can be received against.
+  if (
+    can(permissions, MODULE.purchasingReceiving, "view") &&
+    can(permissions, MODULE.purchasingOrders, "view")
+  ) {
+    purchasing.push({
+      href: "/purchasing/orders?view=outstanding",
+      label: "Receiving",
+    });
+  }
   if (can(permissions, MODULE.purchasingVendors, "view")) {
     purchasing.push({ href: "/purchasing/vendors", label: "Suppliers" });
   }
@@ -166,23 +200,9 @@ export default async function AppLayout({
     groups.push({ group: "Accounting", items: accounting });
   }
 
-  const relations: NavItem[] = [];
-  if (can(permissions, MODULE.crmInquiries, "view")) {
-    relations.push({ href: "/crm/inquiries", label: "Inquiries" });
-  }
-  if (can(permissions, MODULE.crmComplaints, "view")) {
-    relations.push({ href: "/crm/complaints", label: "Complaints" });
-  }
-  if (can(permissions, MODULE.calendar, "view")) {
-    relations.push({ href: "/calendar", label: "Calendar" });
-  }
-  if (can(permissions, MODULE.documents, "view")) {
-    relations.push({ href: "/documents", label: "Documents" });
-  }
-  if (relations.length > 0) {
-    groups.push({ group: "Front office", items: relations });
-  }
-
+  // Reports keep a heading of their own: they are read across the whole
+  // business, not only off the ledger, and several readers have them without
+  // any accounting access at all.
   const anyReport = [
     MODULE.reportsReceivables,
     MODULE.reportsSales,
@@ -200,13 +220,21 @@ export default async function AppLayout({
     });
   }
 
-  // Everyone who can approve anything needs the queue; it self-filters per row.
-  const hasAnyApprove = Object.values(permissions).some((entry) => entry.approve);
-  if (hasAnyApprove) {
-    groups.push({
-      group: "Workflow",
-      items: [{ href: "/approvals", label: "Approvals" }],
-    });
+  const relations: NavItem[] = [];
+  if (can(permissions, MODULE.crmInquiries, "view")) {
+    relations.push({ href: "/crm/inquiries", label: "Inquiries" });
+  }
+  if (can(permissions, MODULE.crmComplaints, "view")) {
+    relations.push({ href: "/crm/complaints", label: "Complaints" });
+  }
+  if (can(permissions, MODULE.calendar, "view")) {
+    relations.push({ href: "/calendar", label: "Calendar" });
+  }
+  if (can(permissions, MODULE.documents, "view")) {
+    relations.push({ href: "/documents", label: "Documents" });
+  }
+  if (relations.length > 0) {
+    groups.push({ group: "Front office", items: relations });
   }
 
   // Billing, maintenance and accounting arrive in later phases and add their

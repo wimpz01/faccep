@@ -32,6 +32,23 @@ export function formatDate(value: string | null | undefined) {
   });
 }
 
+/**
+ * A time column, read back as people write it: "2:30 PM" rather than 14:30:00.
+ *
+ * Postgres hands back `HH:MM:SS`, and the seconds are never meaningful on a
+ * reminder. Returns null rather than a dash so a caller can leave the time out
+ * altogether when none was set.
+ */
+export function formatTime(value: string | null | undefined) {
+  if (!value) return null;
+  const [hour, minute] = value.slice(0, 5).split(":").map(Number);
+  if (Number.isNaN(hour) || Number.isNaN(minute)) return null;
+  return new Date(2000, 0, 1, hour, minute).toLocaleTimeString("en-PH", {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
 export function formatDateLong(value: string | null | undefined) {
   if (!value) return "__________";
   const [year, month, day] = value.slice(0, 10).split("-").map(Number);

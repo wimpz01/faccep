@@ -107,7 +107,7 @@ begin
   ---------------------------------------------------------------------------
   insert into public.utility_periods
     (company_id, location_id, utility, period_start, period_end,
-     provider_amount, provider_consumption, genset_expense, notes)
+     provider_amount, provider_consumption, extra_expense, notes)
   values (v_company, v_location, 'electric', v_month_start, v_month_end,
           62000, 5500, 8000, 'Meralco bill plus generator fuel for the month')
   on conflict (location_id, utility, period_start) do update
@@ -116,7 +116,7 @@ begin
 
   insert into public.utility_periods
     (company_id, location_id, utility, period_start, period_end,
-     provider_amount, provider_consumption, genset_expense, notes)
+     provider_amount, provider_consumption, extra_expense, notes)
   values (v_company, v_location, 'water', v_month_start, v_month_end,
           9000, 320, 0, 'Water district bill for the month')
   on conflict (location_id, utility, period_start) do update

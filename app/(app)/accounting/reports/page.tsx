@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 
 import { PrintButton } from "@/components/print-button";
+import { ReportMasthead } from "@/components/report-shell";
 import { Card, EmptyState, PageHeader } from "@/components/ui";
 import { requirePermission } from "@/lib/auth";
 import { round2 } from "@/lib/billing";
@@ -32,7 +33,7 @@ function defaultRange() {
 export default async function FinancialStatementsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ from?: string; to?: string }>;
+  searchParams: Promise<{ from?: string; to?: string; statement?: string }>;
 }) {
   const filters = await searchParams;
   const context = await requirePermission(MODULE.reportsFinancials, "view");
@@ -41,6 +42,26 @@ export default async function FinancialStatementsPage({
   const range = defaultRange();
   const from = filters.from ?? range.from;
   const to = filters.to ?? range.to;
+
+  /*
+   * Which statement is wanted. All four are worked out either way -- the
+   * filter only decides what reaches the page, so printing one gives a sheet
+   * with that statement on it and nothing else stapled behind it.
+   */
+  const STATEMENTS = {
+    all: "All statements",
+    income: "Income statement",
+    balance: "Balance sheet",
+    trial: "Trial balance",
+    cashflow: "Cash flow",
+  } as const;
+  type StatementKey = keyof typeof STATEMENTS;
+  const statement: StatementKey =
+    filters.statement && filters.statement in STATEMENTS
+      ? (filters.statement as StatementKey)
+      : "all";
+  const shows = (key: Exclude<StatementKey, "all">) =>
+    statement === "all" || statement === key;
 
   const supabase = await createClient();
 
@@ -172,12 +193,25 @@ export default async function FinancialStatementsPage({
 
   return (
     <>
+      <ReportMasthead
+        companyName={context.activeCompany?.companyName}
+        title={statement === "all" ? "Financial statements" : STATEMENTS[statement]}
+        from={from}
+        to={to}
+      />
+
       <div className="no-print">
         <PageHeader
           title="Financial statements"
           description="Built from posted journal entries only. Drafts are excluded."
           action={
             <div className="flex gap-2 flex-wrap">
+              <Link
+                href="/accounting/reports/quarterly"
+                className="btn btn-secondary btn-sm"
+              >
+                Quarterly
+              </Link>
               <Link href="/accounting/journal" className="btn btn-secondary btn-sm">
                 Journal
               </Link>
@@ -189,6 +223,23 @@ export default async function FinancialStatementsPage({
         <div className="mb-5">
           <Card>
             <form method="get" className="grid gap-3 sm:grid-cols-4 items-end">
+              <div>
+                <label className="label" htmlFor="statement">
+                  Statement
+                </label>
+                <select
+                  id="statement"
+                  name="statement"
+                  className="select"
+                  defaultValue={statement}
+                >
+                  {Object.entries(STATEMENTS).map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              </div>
               <div>
                 <label className="label" htmlFor="from">
                   From
@@ -225,6 +276,7 @@ export default async function FinancialStatementsPage({
         </Card>
       ) : (
         <div className="flex flex-col gap-5">
+          {shows("income") ? (
           <Card
             title="Income statement"
             description={`${formatDate(from)} to ${formatDate(to)}`}
@@ -254,7 +306,9 @@ export default async function FinancialStatementsPage({
               </table>
             </div>
           </Card>
+          ) : null}
 
+          {shows("balance") ? (
           <Card
             title="Balance sheet"
             description={`As at ${formatDate(to)}`}
@@ -320,7 +374,9 @@ export default async function FinancialStatementsPage({
               </table>
             </div>
           </Card>
+          ) : null}
 
+          {shows("trial") ? (
           <Card
             title="Trial balance"
             description={`${formatDate(from)} to ${formatDate(to)} · debits and credits must agree`}
@@ -376,7 +432,9 @@ export default async function FinancialStatementsPage({
               </table>
             </div>
           </Card>
+          ) : null}
 
+          {shows("cashflow") ? (
           <Card
             title="Cash flow"
             description="Indirect method: net income adjusted for the movement in working capital."
@@ -436,6 +494,7 @@ export default async function FinancialStatementsPage({
               accounts, revisit this section.
             </p>
           </Card>
+          ) : null}
         </div>
       )}
     </>

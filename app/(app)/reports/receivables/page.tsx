@@ -20,20 +20,45 @@ type InvoiceRow = {
   tenants: { id: string; company_name: string } | null;
 };
 
-export default async function ReceivablesReport() {
+export default async function ReceivablesReport({
+  searchParams,
+}: {
+  searchParams: Promise<{ tenant?: string; view?: string }>;
+}) {
+  const { tenant, view } = await searchParams;
   const context = await requirePermission(MODULE.reportsReceivables, "view");
   const companyId = context.activeCompany!.companyId;
 
   const supabase = await createClient();
-  const { data: invoices } = await supabase
-    .from("invoices")
-    .select(
-      "id, invoice_no, due_date, total, amount_paid, credited_amount, tenants(id, company_name)",
-    )
-    .eq("company_id", companyId)
-    .in("status", ["released", "partially_paid"])
-    .order("due_date")
-    .returns<InvoiceRow[]>();
+  const [{ data: invoices }, { data: tenants }] = await Promise.all([
+    supabase
+      .from("invoices")
+      .select(
+        "id, invoice_no, due_date, total, amount_paid, credited_amount, tenants(id, company_name)",
+      )
+      .eq("company_id", companyId)
+      .in("status", ["released", "partially_paid"])
+      .order("due_date")
+      .returns<InvoiceRow[]>(),
+    supabase
+      .from("tenants")
+      .select("id, company_name")
+      .eq("company_id", companyId)
+      .order("company_name")
+      .returns<{ id: string; company_name: string }[]>(),
+  ]);
+
+  /*
+   * Two controls doing two jobs. The tenant narrows what the report covers;
+   * the view decides whether that comes back as aged totals or as the invoices
+   * behind them. Both live in the URL, so a particular view of a particular
+   * tenant can be bookmarked or sent to somebody.
+   *
+   * An unknown tenant id is treated as "all" rather than silently showing an
+   * empty page.
+   */
+  const chosen = (tenants ?? []).find((row) => row.id === tenant) ?? null;
+  const detailed = view === "detail";
 
   const open = (invoices ?? [])
     .map((invoice) => ({
@@ -44,7 +69,8 @@ export default async function ReceivablesReport() {
           Number(invoice.credited_amount),
       ),
     }))
-    .filter((invoice) => invoice.balance > 0);
+    .filter((invoice) => invoice.balance > 0)
+    .filter((invoice) => !chosen || invoice.tenants?.id === chosen.id);
 
   // Summary by tenant, bucketed by how overdue each invoice is.
   const byTenant = new Map<
@@ -81,9 +107,55 @@ export default async function ReceivablesReport() {
       title="Receivables & aging"
       description="Open invoices by tenant, aged from the due date."
       showRange={false}
+      scopeNote={`${chosen ? chosen.company_name : "All tenants"} · ${
+        detailed ? "Detailed" : "Summary"
+      }`}
+      extraFilters={
+        <>
+          <div className="sm:col-span-2">
+            <label className="label" htmlFor="view">
+              Show
+            </label>
+            <select
+              id="view"
+              name="view"
+              className="select"
+              defaultValue={detailed ? "detail" : "summary"}
+            >
+              <option value="summary">Summary — aged totals</option>
+              <option value="detail">Detailed — every open invoice</option>
+            </select>
+          </div>
+          <div className="sm:col-span-2">
+            <label className="label" htmlFor="tenant">
+              Tenant
+            </label>
+            <select
+              id="tenant"
+              name="tenant"
+              className="select"
+              defaultValue={chosen?.id ?? ""}
+            >
+              <option value="">All tenants</option>
+              {(tenants ?? []).map((row) => (
+                <option key={row.id} value={row.id}>
+                  {row.company_name}
+                </option>
+              ))}
+            </select>
+          </div>
+        </>
+      }
+      filterNote="The tenant narrows either view. One tenant with Detailed gives you their statement."
     >
-      <div className="mb-5">
-        <Card title="Customer aging summary" bodyClassName="">
+      {!detailed ? (
+        <Card
+          title={
+            chosen ? `Aging — ${chosen.company_name}` : "Customer aging summary"
+          }
+          description="What is owed, split by how long it has been due."
+          bodyClassName=""
+        >
           {rows.length > 0 ? (
             <div className="table-scroll">
               <table className="table">
@@ -135,12 +207,27 @@ export default async function ReceivablesReport() {
               </table>
             </div>
           ) : (
-            <EmptyState>Nothing outstanding.</EmptyState>
+            <EmptyState>
+              {chosen
+                ? `${chosen.company_name} owes nothing.`
+                : "Nothing outstanding."}
+            </EmptyState>
           )}
         </Card>
-      </div>
-
-      <Card title="Detail — open invoices" bodyClassName="">
+      ) : (
+      <Card
+        title={
+          chosen
+            ? `Open invoices — ${chosen.company_name}`
+            : "Detail — open invoices"
+        }
+        description={
+          chosen
+            ? `Every open invoice for ${chosen.company_name}, oldest due first.`
+            : "Every open invoice, oldest due first."
+        }
+        bodyClassName=""
+      >
         {open.length > 0 ? (
           <div className="table-scroll">
             <table className="table">
@@ -175,6 +262,34 @@ export default async function ReceivablesReport() {
                     </td>
                   </tr>
                 ))}
+                <tr>
+                  <td colSpan={4} className="text-right font-bold">
+                    {chosen ? `Owed by ${chosen.company_name}` : "Total owed"}
+                  </td>
+                  <td className="text-right tabular-nums font-bold">
+                    {money(
+                      round2(
+                        open.reduce((sum, row) => sum + Number(row.total), 0),
+                      ),
+                    )}
+                  </td>
+                  <td className="text-right tabular-nums font-bold">
+                    {money(
+                      round2(
+                        open.reduce(
+                          (sum, row) =>
+                            sum +
+                            Number(row.amount_paid) +
+                            Number(row.credited_amount),
+                          0,
+                        ),
+                      ),
+                    )}
+                  </td>
+                  <td className="text-right tabular-nums font-bold">
+                    {money(grandTotal)}
+                  </td>
+                </tr>
               </tbody>
             </table>
           </div>
@@ -182,6 +297,7 @@ export default async function ReceivablesReport() {
           <EmptyState>No open invoices.</EmptyState>
         )}
       </Card>
+      )}
     </ReportShell>
   );
 }

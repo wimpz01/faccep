@@ -13,6 +13,7 @@ export type CompanyValues = {
   legal_name?: string | null;
   tin?: string | null;
   address?: string | null;
+  zip_code?: string | null;
   contact_person?: string | null;
   contact_number?: string | null;
   email?: string | null;
@@ -121,7 +122,7 @@ export function CompanyForm({
 
       <div className="sm:col-span-2">
         <label className="label" htmlFor={`address-${company?.id ?? "new"}`}>
-          Address
+          Registered address
         </label>
         <textarea
           id={`address-${company?.id ?? "new"}`}
@@ -129,6 +130,18 @@ export function CompanyForm({
           className="textarea"
           rows={2}
           defaultValue={company?.address ?? ""}
+        />
+      </div>
+
+      <div>
+        <label className="label" htmlFor={`zip-${company?.id ?? "new"}`}>
+          ZIP code
+        </label>
+        <input
+          id={`zip-${company?.id ?? "new"}`}
+          name="zip_code"
+          className="input"
+          defaultValue={company?.zip_code ?? ""}
         />
       </div>
 

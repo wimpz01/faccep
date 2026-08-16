@@ -274,6 +274,66 @@ export async function createCalendarEvent(
   return { success: "Added to your calendar." };
 }
 
+/**
+ * Edits one of your own reminders.
+ *
+ * The row filter carries user_id as well as the id: the policy already refuses
+ * anyone else's entry, but saying so here means an attempt to edit one comes
+ * back as "not found" rather than a silent success against nought rows.
+ */
+export async function updateCalendarEvent(
+  _prevState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const context = await getSessionContext();
+  if (!context) return { error: "Not signed in." };
+
+  const id = String(formData.get("id") ?? "");
+  const title = String(formData.get("title") ?? "").trim();
+  const date = String(formData.get("event_date") ?? "").slice(0, 10);
+  if (!id) return { error: "Missing reminder." };
+  if (!title || !date) return { error: "A title and a date are required." };
+
+  const supabase = await createClient();
+  const { data: changed, error } = await supabase
+    .from("calendar_events")
+    .update({
+      title,
+      details: String(formData.get("details") ?? "").trim() || null,
+      event_date: date,
+      event_time: String(formData.get("event_time") ?? "") || null,
+      remind_days_before: Number(formData.get("remind_days_before") ?? 0) || 0,
+    })
+    .eq("id", id)
+    .eq("user_id", context.userId)
+    .select("id");
+
+  if (error) return { error: error.message };
+  if (!changed || changed.length === 0) {
+    return { error: "That reminder is not yours, or no longer exists." };
+  }
+
+  revalidatePath("/calendar");
+  revalidatePath(`/calendar/${id}`);
+  return { success: "Reminder saved." };
+}
+
+export async function deleteCalendarEvent(formData: FormData) {
+  const context = await getSessionContext();
+  if (!context) return;
+
+  const id = String(formData.get("id") ?? "");
+  const supabase = await createClient();
+  await supabase
+    .from("calendar_events")
+    .delete()
+    .eq("id", id)
+    .eq("user_id", context.userId);
+
+  revalidatePath("/calendar");
+  redirect("/calendar");
+}
+
 export async function toggleCalendarEvent(formData: FormData) {
   const context = await getSessionContext();
   if (!context) return;

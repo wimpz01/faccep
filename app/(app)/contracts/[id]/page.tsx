@@ -59,6 +59,8 @@ type ContractDetail = {
     inclusion: string;
     label: string | null;
     amount: string | null;
+    tax_treatment: string | null;
+    vat_mode: string | null;
   }[];
 };
 
@@ -80,7 +82,7 @@ export default async function ContractDetailPage({
     .select(
       `*, tenants(company_name),
        contract_units(unit_id, units(code)),
-       contract_inclusions(inclusion, label, amount)`,
+       contract_inclusions(inclusion, label, amount, tax_treatment, vat_mode)`,
     )
     .eq("id", id)
     .maybeSingle<ContractDetail>();
@@ -135,12 +137,13 @@ export default async function ContractDetailPage({
   const { data: funds } = await supabase
     .from("contract_fund_status")
     .select(
-      `deposit_taken, deposit_drawn, deposit_remaining, deposit_status,
+      `deposit_taken, deposit_received, deposit_drawn, deposit_remaining, deposit_status,
        advance_taken, advance_drawn, advance_remaining, advance_status`,
     )
     .eq("contract_id", id)
     .maybeSingle<{
       deposit_taken: string;
+      deposit_received: string;
       deposit_drawn: string;
       deposit_remaining: string;
       deposit_status: string;
@@ -246,14 +249,22 @@ export default async function ContractDetailPage({
               Deposit / advance
             </p>
             <p className="text-lg font-bold mt-1 tabular-nums">
-              {money(funds?.deposit_remaining ?? contract.security_deposit)}
+              {money(funds?.deposit_remaining ?? 0)}
             </p>
+            {/* Held is what was actually receipted. A deposit agreed at
+                signing but never collected is money you do not have, and
+                saying so is the whole point of the distinction. */}
+            {funds?.deposit_status === "not_received" ? (
+              <p className="text-xs" style={{ color: "var(--danger)" }}>
+                {money(funds.deposit_taken)} agreed — not yet received
+              </p>
+            ) : (
+              <p className="text-xs muted">
+                of {money(funds?.deposit_received ?? 0)} received
+              </p>
+            )}
             <p className="text-xs muted">
               Advance {money(funds?.advance_remaining ?? contract.advance_payment)}
-              {funds &&
-              (Number(funds.deposit_drawn) > 0 || Number(funds.advance_drawn) > 0)
-                ? " — what is left"
-                : ""}
             </p>
           </div>
         </div>
@@ -364,7 +375,8 @@ export default async function ContractDetailPage({
               <thead>
                 <tr>
                   <th>Fund</th>
-                  <th className="text-right">Taken at signing</th>
+                  <th className="text-right">Agreed at signing</th>
+                  <th className="text-right">Received</th>
                   <th className="text-right">Drawn</th>
                   <th className="text-right">Remaining</th>
                   <th>Status</th>
@@ -376,11 +388,21 @@ export default async function ContractDetailPage({
                   <td className="text-right tabular-nums text-sm">
                     {money(funds?.deposit_taken ?? contract.security_deposit)}
                   </td>
+                  <td
+                    className="text-right tabular-nums text-sm"
+                    style={
+                      funds?.deposit_status === "not_received"
+                        ? { color: "var(--danger)" }
+                        : undefined
+                    }
+                  >
+                    {money(funds?.deposit_received ?? 0)}
+                  </td>
                   <td className="text-right tabular-nums text-sm">
                     {money(funds?.deposit_drawn ?? 0)}
                   </td>
                   <td className="text-right tabular-nums font-medium">
-                    {money(funds?.deposit_remaining ?? contract.security_deposit)}
+                    {money(funds?.deposit_remaining ?? 0)}
                   </td>
                   <td className="text-xs">
                     {FUND_STATUS[funds?.deposit_status ?? "held"] ?? "Held"}
@@ -391,6 +413,7 @@ export default async function ContractDetailPage({
                   <td className="text-right tabular-nums text-sm">
                     {money(funds?.advance_taken ?? contract.advance_payment)}
                   </td>
+                  <td className="text-right tabular-nums text-xs muted">—</td>
                   <td className="text-right tabular-nums text-sm">
                     {money(funds?.advance_drawn ?? 0)}
                   </td>

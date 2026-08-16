@@ -216,16 +216,26 @@ export async function updateCompanyUser(
       profiles: { email: string } | null;
     }>();
 
-  const { error } = await supabase
+  // Asking for the row back is what proves the write landed. Without it an
+  // update the policy filtered out comes back clean with nothing changed, and
+  // the screen would say the access was saved when the person still has none.
+  const { data: changed, error } = await supabase
     .from("company_users")
     .update({
       role_id: roleId || null,
       is_company_admin: isCompanyAdmin,
       is_active: isActive,
     })
-    .eq("id", companyUserId);
+    .eq("id", companyUserId)
+    .select("id");
 
   if (error) return { error: error.message };
+  if (!changed || changed.length === 0) {
+    return {
+      error:
+        "Nothing was changed. This account cannot write to that membership — check that you still have edit rights on Users for this company.",
+    };
+  }
 
   await logAudit({
     action: "update",
