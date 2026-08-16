@@ -44,7 +44,11 @@ type InvoiceDetail = {
   cancelled_at: string | null;
   cancellation_reason: string | null;
   tenants: { id: string; company_name: string } | null;
-  contracts: { id: string; contract_no: string } | null;
+  contracts: {
+    id: string;
+    contract_no: string;
+    contract_units: { unit_id: string; units: { code: string } | null }[];
+  } | null;
   invoice_lines: {
     id: string;
     line_kind: string;
@@ -88,7 +92,8 @@ export default async function InvoiceDetailPage({
   const { data: invoice } = await supabase
     .from("invoices")
     .select(
-      `*, tenants(id, company_name), contracts(id, contract_no),
+      `*, tenants(id, company_name),
+       contracts(id, contract_no, contract_units(unit_id, units(code))),
        invoice_lines(id, line_kind, description, quantity, unit_price, amount, is_vatable, sort_order,
          utility_periods(id, utility, period_start, period_end, locations(code))),
        credit_memos(id, memo_no, memo_date, amount, reason)`,
@@ -119,6 +124,61 @@ export default async function InvoiceDetailPage({
   const lines = [...(invoice.invoice_lines ?? [])].sort(
     (a, b) => a.sort_order - b.sort_order,
   );
+
+  /*
+   * The meters behind the utility lines, so a charge can be checked against
+   * the readings it came from without opening the period. Looked up per unit
+   * rather than assumed: each unit is its own contract here, so there is
+   * normally one meter, but a contract holding two would show both.
+   */
+  const periodIds = [
+    ...new Set(
+      lines
+        .map((line) => line.utility_periods?.id)
+        .filter(Boolean) as string[],
+    ),
+  ];
+  const unitIds = (invoice.contracts?.contract_units ?? []).map(
+    (link) => link.unit_id,
+  );
+
+  const { data: readings } =
+    periodIds.length > 0 && unitIds.length > 0
+      ? await supabase
+          .from("meter_readings")
+          .select("period_id, unit_id, previous_reading, present_reading")
+          .in("period_id", periodIds)
+          .in("unit_id", unitIds)
+          .returns<
+            {
+              period_id: string;
+              unit_id: string;
+              previous_reading: string;
+              present_reading: string;
+            }[]
+          >()
+      : { data: [] };
+
+  const unitCode = new Map(
+    (invoice.contracts?.contract_units ?? []).map((link) => [
+      link.unit_id,
+      link.units?.code ?? "",
+    ]),
+  );
+  const metersByPeriod = new Map<
+    string,
+    { unitId: string; previous: number; present: number }[]
+  >();
+  for (const row of readings ?? []) {
+    const held = metersByPeriod.get(row.period_id) ?? [];
+    held.push({
+      unitId: row.unit_id,
+      previous: Number(row.previous_reading),
+      present: Number(row.present_reading),
+    });
+    metersByPeriod.set(row.period_id, held);
+  }
+
   const balance =
     Number(invoice.total) -
     Number(invoice.amount_paid) -
@@ -236,6 +296,8 @@ export default async function InvoiceDetailPage({
               <thead>
                 <tr>
                   <th>Description</th>
+                  <th className="text-right">Previous</th>
+                  <th className="text-right">Present</th>
                   <th className="text-right">Qty</th>
                   <th className="text-right">Rate</th>
                   <th className="text-right">Amount</th>
@@ -243,7 +305,11 @@ export default async function InvoiceDetailPage({
                 </tr>
               </thead>
               <tbody>
-                {lines.map((line) => (
+                {lines.map((line) => {
+                  const meters = line.utility_periods
+                    ? (metersByPeriod.get(line.utility_periods.id) ?? [])
+                    : [];
+                  return (
                   <tr key={line.id}>
                     <td>
                       <span className="badge mr-2">{line.line_kind}</span>
@@ -259,6 +325,27 @@ export default async function InvoiceDetailPage({
                         </p>
                       ) : null}
                     </td>
+                    {/* One reading to a row when a contract holds several
+                        meters, each named, so no figure is a sum of two. */}
+                    <td className="text-right tabular-nums">
+                      {meters.map((meter) => (
+                        <p key={meter.unitId} className="m-0">
+                          {meters.length > 1 && unitCode.get(meter.unitId) ? (
+                            <span className="text-xs muted mr-1">
+                              {unitCode.get(meter.unitId)}
+                            </span>
+                          ) : null}
+                          {meter.previous}
+                        </p>
+                      ))}
+                    </td>
+                    <td className="text-right tabular-nums">
+                      {meters.map((meter) => (
+                        <p key={meter.unitId} className="m-0">
+                          {meter.present}
+                        </p>
+                      ))}
+                    </td>
                     <td className="text-right tabular-nums">
                       {Number(line.quantity)}
                     </td>
@@ -268,9 +355,10 @@ export default async function InvoiceDetailPage({
                     <td className="text-right tabular-nums">{money(line.amount)}</td>
                     <td className="text-xs">{line.is_vatable ? "yes" : "—"}</td>
                   </tr>
-                ))}
+                  );
+                })}
                 <tr>
-                  <td colSpan={3} className="text-right font-semibold">
+                  <td colSpan={5} className="text-right font-semibold">
                     Subtotal
                   </td>
                   <td className="text-right tabular-nums font-semibold">
@@ -280,7 +368,7 @@ export default async function InvoiceDetailPage({
                 </tr>
                 {invoice.is_vatable ? (
                   <tr>
-                    <td colSpan={3} className="text-right font-semibold">
+                    <td colSpan={5} className="text-right font-semibold">
                       VAT ({Number(invoice.vat_rate)}%)
                     </td>
                     <td className="text-right tabular-nums font-semibold">
@@ -290,7 +378,7 @@ export default async function InvoiceDetailPage({
                   </tr>
                 ) : null}
                 <tr>
-                  <td colSpan={3} className="text-right font-bold">
+                  <td colSpan={5} className="text-right font-bold">
                     Total
                   </td>
                   <td

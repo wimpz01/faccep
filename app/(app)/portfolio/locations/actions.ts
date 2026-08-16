@@ -16,6 +16,18 @@ const locationSchema = z.object({
     .trim()
     .min(1, "A short code is required.")
     .max(20, "Keep the code to 20 characters or fewer."),
+  /*
+   * Blank on creation: the database assigns the lowest free letter, so nobody
+   * has to know which are taken. A value only arrives when somebody is
+   * correcting one, and it is upper-cased here so entering 'b' saves rather
+   * than returning a constraint violation to decipher.
+   */
+  invoice_prefix: z
+    .string()
+    .trim()
+    .toUpperCase()
+    .regex(/^[A-Z]$/, "The invoice letter must be a single letter, A to Z.")
+    .or(z.literal("")),
   name: z.string().trim().min(2, "Location name is required."),
   property_type: z.enum([
     "commercial_building",
@@ -30,6 +42,7 @@ const locationSchema = z.object({
 function readForm(formData: FormData) {
   return locationSchema.safeParse({
     code: formData.get("code"),
+    invoice_prefix: formData.get("invoice_prefix") ?? "",
     name: formData.get("name"),
     property_type: formData.get("property_type"),
     address: formData.get("address"),
@@ -66,7 +79,7 @@ export async function createLocation(
     return {
       error:
         error.code === "23505"
-          ? "That location code is already used in this company."
+          ? "That location code or invoice letter is already used in this company."
           : error.message,
     };
   }
@@ -101,7 +114,7 @@ export async function updateLocation(
   const supabase = await createClient();
   const { data: before } = await supabase
     .from("locations")
-    .select("code, name, property_type, address")
+    .select("code, invoice_prefix, name, property_type, address")
     .eq("id", id)
     .single();
 
@@ -114,7 +127,7 @@ export async function updateLocation(
     return {
       error:
         error.code === "23505"
-          ? "That location code is already used in this company."
+          ? "That location code or invoice letter is already used in this company."
           : error.message,
     };
   }

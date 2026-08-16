@@ -14,6 +14,7 @@ export const metadata: Metadata = { title: "Locations" };
 type LocationRow = {
   id: string;
   code: string;
+  invoice_prefix: string;
   name: string;
   property_type: string;
   address: string | null;
@@ -32,7 +33,7 @@ export default async function LocationsPage() {
   const supabase = await createClient();
   const { data: locations } = await supabase
     .from("locations")
-    .select("id, code, name, property_type, address, is_active")
+    .select("id, code, invoice_prefix, name, property_type, address, is_active")
     .eq("company_id", companyId)
     .order("code")
     .returns<LocationRow[]>();
@@ -70,6 +71,9 @@ export default async function LocationsPage() {
                     <span className="font-semibold text-sm">{location.name}</span>
                     <span className="text-xs muted ml-2">
                       {TYPE_LABELS[location.property_type] ?? location.property_type}
+                      {" · bills as "}
+                      {location.invoice_prefix}-
+                      {String(new Date().getFullYear()).slice(2)}-00001
                     </span>
                   </span>
                   <span className="flex items-center gap-2">

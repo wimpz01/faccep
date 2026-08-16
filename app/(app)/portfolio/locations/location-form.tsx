@@ -11,6 +11,7 @@ import { PROPERTY_TYPES } from "./constants";
 export type LocationValues = {
   id?: string;
   code?: string | null;
+  invoice_prefix?: string | null;
   name?: string | null;
   property_type?: string | null;
   address?: string | null;
@@ -56,6 +57,30 @@ export function LocationForm({
           placeholder="BLDG-A"
           defaultValue={location?.code ?? ""}
         />
+      </div>
+
+      {/* Kept apart from the code because it goes on documents a tenant
+          keeps: renaming the code must not renumber the invoice series.
+          Left blank on a new location, the database picks the next letter. */}
+      <div>
+        <label className="label" htmlFor={`prefix-${key}`}>
+          Invoice letter
+        </label>
+        <input
+          id={`prefix-${key}`}
+          name="invoice_prefix"
+          className="input"
+          maxLength={1}
+          pattern="[A-Za-z]"
+          placeholder={location?.id ? "" : "assigned automatically"}
+          defaultValue={location?.invoice_prefix ?? ""}
+          style={{ textTransform: "uppercase" }}
+        />
+        <p className="text-xs muted mt-1">
+          {location?.invoice_prefix
+            ? `Invoices bill as ${location.invoice_prefix}-${String(new Date().getFullYear()).slice(2)}-00001. Change it only to correct it.`
+            : "One letter. Leave it empty and the next free letter is used."}
+        </p>
       </div>
 
       <div>

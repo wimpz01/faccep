@@ -43,6 +43,7 @@ export const MODULE = {
   dashboardCheques: "dashboard.cheques",
   tenants: "tenants",
   contracts: "contracts",
+  contractDeposits: "contracts.deposits",
   clearance: "clearance",
   properties: "properties",
   units: "units",

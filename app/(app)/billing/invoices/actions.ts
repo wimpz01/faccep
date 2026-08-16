@@ -7,18 +7,23 @@ import { requestApproval } from "@/lib/approvals";
 import { logAudit } from "@/lib/audit";
 import { assertPermission, getSessionContext } from "@/lib/auth";
 import {
-  derivedRate,
   dueDateFor,
-  gensetShare,
+  effectiveRate,
+  expenseShare,
   latePenalty,
   monthLabel,
   rentForPeriod,
   round2,
+  taxedAmount,
   utilityCharge,
+  type TaxTreatment,
   type UtilityBillingType,
+  type VatMode,
 } from "@/lib/billing";
 import { MODULE, can } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
+
+import { ALL_LOCATIONS } from "./constants";
 
 export type ActionState = { error?: string; success?: string };
 
@@ -30,7 +35,7 @@ type NewLine = {
   amount: number;
   is_vatable: boolean;
   sort_order: number;
-  /** Set on utility and genset lines, tying the charge to the provider bill. */
+  /** Set on utility and expense-share lines, tying them to the provider bill. */
   utility_period_id?: string;
 };
 
@@ -39,9 +44,9 @@ type NewLine = {
  *
  * Everything is derived: rent from the contract's escalation schedule, water
  * and electricity from the sub-meter readings and the period's derived rate,
- * the genset share pro-rata by kWh, and penalties from what is still unpaid on
- * earlier invoices. Existing invoices for the same contract and period are
- * skipped rather than duplicated.
+ * each utility's building expense shared out by consumption, and penalties
+ * from what is still unpaid on earlier invoices. Existing invoices for the
+ * same contract and period are skipped rather than duplicated.
  */
 export async function generateInvoices(
   _prevState: ActionState,
@@ -58,12 +63,65 @@ export async function generateInvoices(
   const periodStart = String(formData.get("period_start") ?? "").slice(0, 10);
   if (!periodStart) return { error: "Choose the billing month." };
 
+  /*
+   * Which properties to bill, checked here and not only in the form.
+   * A request that names none is refused outright rather than falling through
+   * to "no filter": billing everywhere has to be asked for by name, so that
+   * an empty field can never quietly mean the whole portfolio.
+   */
+  const selected = [
+    ...new Set(
+      formData
+        .getAll("location_ids")
+        .map((value) => String(value).trim())
+        .filter(Boolean),
+    ),
+  ];
+  if (selected.length === 0) {
+    return { error: "Choose a location to bill." };
+  }
+  const billEverywhere = selected.includes(ALL_LOCATIONS);
+
   const [year, month] = periodStart.split("-").map(Number);
   const monthStart = `${year}-${String(month).padStart(2, "0")}-01`;
   const monthEnd = new Date(year, month, 0).toISOString().slice(0, 10);
 
   const supabase = await createClient();
 
+  /*
+   * Resolved against the database either way. "All" is expanded here rather
+   * than left as an absent filter, so the run works from a named list of
+   * properties and can report on each of them by name afterwards. A specific
+   * id is only trusted once it is shown to belong to this company.
+   */
+  let locationQuery = supabase
+    .from("locations")
+    .select("id, code, name")
+    .eq("company_id", companyId)
+    .eq("is_active", true);
+  if (!billEverywhere) locationQuery = locationQuery.in("id", selected);
+
+  const { data: chosenLocations } = await locationQuery
+    .order("code")
+    .returns<{ id: string; code: string; name: string }[]>();
+
+  const locations = chosenLocations ?? [];
+  if (locations.length === 0) {
+    return {
+      error: billEverywhere
+        ? "There are no active locations to bill."
+        : "That location is not part of this company.",
+    };
+  }
+  const locationIds = locations.map((row) => row.id);
+  const nameOf = new Map(locations.map((row) => [row.id, row.code]));
+
+  /*
+   * Only contracts holding a unit in one of the chosen properties. The inner
+   * join is what does the scoping: without it PostgREST would return every
+   * active contract and merely leave the embedded units empty for the ones
+   * that do not match, which reads as "no units" rather than "not selected".
+   */
   const { data: contracts } = await supabase
     .from("contracts")
     .select(
@@ -72,26 +130,33 @@ export async function generateInvoices(
        water_billing_type, water_fixed_amount, water_minimum_amount,
        electric_billing_type, electric_fixed_amount, electric_minimum_amount,
        tenants(company_name, is_vatable),
-       contract_units(unit_id, units(id, code, location_id)),
-       contract_inclusions(inclusion, label, amount, sort_order)`,
+       contract_units!inner(unit_id, units!inner(id, code, location_id)),
+       contract_inclusions(inclusion, label, amount, sort_order,
+         tax_treatment, vat_mode)`,
     )
     .eq("company_id", companyId)
     .eq("status", "active")
     .lte("start_date", monthEnd)
     .gte("end_date", monthStart)
+    .in("contract_units.units.location_id", locationIds)
     .returns<ContractForBilling[]>();
 
   if (!contracts || contracts.length === 0) {
-    return { error: "No active contracts cover that month." };
+    return {
+      error: `No active contracts cover ${monthLabel(monthStart)} in ${locations
+        .map((row) => row.code)
+        .join(", ")}.`,
+    };
   }
 
   // Utility periods covering the month, keyed by location and utility.
   const { data: periods } = await supabase
     .from("utility_periods")
     .select(
-      "id, location_id, utility, provider_amount, provider_consumption, genset_expense, is_locked, locations(code)",
+      "id, location_id, utility, provider_amount, provider_consumption, manual_rate, extra_expense, is_locked, locations(code)",
     )
     .eq("company_id", companyId)
+    .in("location_id", locationIds)
     .lte("period_start", monthEnd)
     .gte("period_end", monthStart)
     .returns<UtilityPeriodRow[]>();
@@ -103,6 +168,15 @@ export async function generateInvoices(
     ]),
   );
 
+  // One rate per company, read once. Every line stamps the rate in force now,
+  // so changing it later cannot restate an invoice already raised.
+  const { data: taxSettings } = await supabase
+    .from("accounting_settings")
+    .select("vat_rate")
+    .eq("company_id", companyId)
+    .maybeSingle<{ vat_rate: string }>();
+  const vatRate = Number(taxSettings?.vat_rate ?? 0);
+
   /**
    * Both utilities must be measured and declared final before anyone is
    * billed. A period that is still open can have its provider bill or its
@@ -113,25 +187,22 @@ export async function generateInvoices(
    * never half billed.
    */
   const blockers: string[] = [];
-  const locationsToBill = new Map<string, string>();
+  const locationsToBill = new Set<string>();
   for (const contract of contracts) {
     for (const link of contract.contract_units ?? []) {
       const location = link.units?.location_id;
-      if (location) locationsToBill.set(location, location);
+      if (location && nameOf.has(location)) locationsToBill.add(location);
     }
   }
 
-  const { data: billedLocations } = await supabase
-    .from("locations")
-    .select("id, code")
-    .in("id", [...locationsToBill.keys()])
-    .returns<{ id: string; code: string }[]>();
+  const locationCode = nameOf;
 
-  const locationCode = new Map(
-    (billedLocations ?? []).map((row) => [row.id, row.code]),
-  );
+  // A chosen property with nothing to bill is not a blocker -- it has no
+  // utility period to demand -- but it is worth saying so rather than leaving
+  // it out of the report altogether.
+  const emptyLocations = locationIds.filter((id) => !locationsToBill.has(id));
 
-  for (const locationId of locationsToBill.keys()) {
+  for (const locationId of locationsToBill) {
     for (const utility of ["electric", "water"] as const) {
       const period = periodByKey.get(`${locationId}:${utility}`);
       const label = utility === "electric" ? "electricity" : "water";
@@ -183,7 +254,7 @@ export async function generateInvoices(
     (readings ?? []).map((row) => [`${row.period_id}:${row.unit_id}`, row]),
   );
 
-  // Building totals per electric period, needed for the genset split.
+  // Building totals per period, needed to share out that period's expense.
   const buildingConsumption = new Map<string, number>();
   for (const row of readings ?? []) {
     buildingConsumption.set(
@@ -226,10 +297,42 @@ export async function generateInvoices(
   let created = 0;
   let skipped = 0;
   const problems: string[] = [];
+  // Counted per property, because that is how the run is now scoped and how
+  // the person who asked for it will check the result.
+  const tally = new Map<string, { created: number; skipped: number }>(
+    locationIds.map((id) => [id, { created: 0, skipped: 0 }]),
+  );
+  const countFor = (id: string | null) =>
+    id ? tally.get(id) : undefined;
 
   for (const contract of contracts) {
+    /*
+     * Which property this invoice is billed against, fixed here and written
+     * onto the record. The inner join has already narrowed the contract's
+     * units to the chosen properties, so the first is the right one; a
+     * contract straddling two of them is refused rather than guessed at.
+     */
+    const contractLocations = [
+      ...new Set(
+        (contract.contract_units ?? [])
+          .map((link) => link.units?.location_id)
+          .filter((id): id is string => Boolean(id) && nameOf.has(id!)),
+      ),
+    ];
+    if (contractLocations.length > 1) {
+      problems.push(
+        `${contract.tenants?.company_name ?? contract.id}: holds units in ${contractLocations
+          .map((id) => nameOf.get(id))
+          .join(" and ")}, so it cannot be billed to one property. Bill those separately.`,
+      );
+      continue;
+    }
+    const contractLocationId = contractLocations[0] ?? null;
+
     if (alreadyBilled.has(contract.id)) {
       skipped += 1;
+      const counter = countFor(contractLocationId);
+      if (counter) counter.skipped += 1;
       continue;
     }
 
@@ -239,6 +342,28 @@ export async function generateInvoices(
     );
     const lines: NewLine[] = [];
     let order = 0;
+
+    /*
+     * Where a line's tax treatment comes from: the contract item it was raised
+     * against. A metered utility takes its treatment from that utility's
+     * inclusion, and the share of a building expense follows the utility it
+     * belongs to. A penalty answers to no inclusion, so it stays as it has
+     * always been billed -- VATable, exclusive.
+     */
+    const treatmentFor = (kind: string) => {
+      const key =
+        kind === "genset"
+          ? "electricity"
+          : kind === "water_expense"
+            ? "water"
+            : kind;
+      const item = inclusions.get(key);
+      const treatment = (item?.tax_treatment ?? "vatable") as TaxTreatment;
+      return {
+        treatment,
+        mode: (item?.vat_mode ?? "exclusive") as VatMode,
+      };
+    };
 
     if (inclusions.has("rent")) {
       /*
@@ -379,10 +504,13 @@ export async function generateInvoices(
         );
       }
 
-      const rate = derivedRate(
-        Number(period.provider_amount),
-        Number(period.provider_consumption),
-      );
+      // What the period charges, which is its own rate where one was set.
+      const rate = effectiveRate({
+        providerAmount: Number(period.provider_amount),
+        providerConsumption: Number(period.provider_consumption),
+        manualRate:
+          period.manual_rate === null ? null : Number(period.manual_rate),
+      });
 
       const charge = utilityCharge({
         consumption,
@@ -403,14 +531,27 @@ export async function generateInvoices(
         utility_period_id: period.id,
       });
 
-      // Genset expense split pro-rata by the tenant's kWh share (spec 6).
-      if (utility === "electric" && Number(period.genset_expense) > 0) {
+      /*
+       * The building's own cost for this period, shared out by what each
+       * tenant consumed (spec 6). On electricity that is the generator; on
+       * water it is pumping, tanks and treatment. The same split either way,
+       * and a line of its own so a tenant can tell what they used apart from
+       * what they are carrying a share of.
+       */
+      if (Number(period.extra_expense) > 0) {
         const total = buildingConsumption.get(period.id) ?? 0;
-        const share = gensetShare(consumption, total, Number(period.genset_expense));
+        const share = expenseShare(
+          consumption,
+          total,
+          Number(period.extra_expense),
+        );
         if (share > 0) {
+          const isWater = utility === "water";
           lines.push({
-            line_kind: "genset",
-            description: `Generator expense share — ${round2(consumption)} of ${round2(total)} kWh`,
+            line_kind: isWater ? "water_expense" : "genset",
+            description: isWater
+              ? `Water expense share — ${round2(consumption)} of ${round2(total)} cu.m`
+              : `Generator expense share — ${round2(consumption)} of ${round2(total)} kWh`,
             quantity: 1,
             unit_price: share,
             amount: share,
@@ -452,6 +593,8 @@ export async function generateInvoices(
         company_id: companyId,
         tenant_id: contract.tenant_id,
         contract_id: contract.id,
+        // Written once. The number the trigger issues follows from it.
+        location_id: contractLocationId,
         invoice_date: monthStart,
         due_date: dueDateFor(monthStart, contract.rent_due_day),
         period_start: monthStart,
@@ -468,7 +611,30 @@ export async function generateInvoices(
 
     const { error: lineError } = await supabase
       .from("invoice_lines")
-      .insert(lines.map((line) => ({ invoice_id: invoice.id, ...line })));
+      .insert(
+        // Each line taxed on its own terms, never off the invoice total.
+        lines.map((line) => {
+          const { treatment, mode } = treatmentFor(line.line_kind);
+          const taxed = taxedAmount({
+            amount: line.amount,
+            treatment,
+            mode,
+            vatRate,
+            tenantIsVatable: isVatable,
+          });
+          return {
+            invoice_id: invoice.id,
+            ...line,
+            tax_treatment: treatment,
+            vat_mode: treatment === "vatable" ? mode : null,
+            vat_rate: taxed.rate,
+            net_amount: taxed.net,
+            vat_amount: taxed.vat,
+            line_total: taxed.total,
+            is_vatable: taxed.vat > 0,
+          };
+        }),
+      );
 
     if (lineError) {
       problems.push(`${contract.tenants?.company_name}: ${lineError.message}`);
@@ -476,14 +642,36 @@ export async function generateInvoices(
     }
 
     created += 1;
+    const counter = countFor(contractLocationId);
+    if (counter) counter.created += 1;
   }
+
+  // Per property: what was raised, and where nothing was, why.
+  const perLocation = locationIds.map((id) => {
+    const code = nameOf.get(id) ?? "That location";
+    const counter = tally.get(id) ?? { created: 0, skipped: 0 };
+    if (counter.created > 0) {
+      return `${code}: ${counter.created} draft${counter.created === 1 ? "" : "s"}${
+        counter.skipped ? ` (${counter.skipped} already billed)` : ""
+      }`;
+    }
+    if (counter.skipped > 0) {
+      return `${code}: nothing new — all ${counter.skipped} already billed for this month`;
+    }
+    if (emptyLocations.includes(id)) {
+      return `${code}: nothing — no active contract covers ${monthLabel(monthStart)}`;
+    }
+    return `${code}: nothing raised — see the notes below`;
+  });
 
   await logAudit({
     action: "create",
     moduleKey: MODULE.billingInvoices,
     entityTable: "invoices",
-    summary: `Generated ${created} draft invoice(s) for ${monthLabel(monthStart)}.`,
-    after: { created, skipped, problems },
+    summary: `Generated ${created} draft invoice(s) for ${monthLabel(monthStart)} in ${locations
+      .map((row) => row.code)
+      .join(", ")}.`,
+    after: { created, skipped, perLocation, problems },
   });
 
   revalidatePath("/billing/invoices");
@@ -491,17 +679,15 @@ export async function generateInvoices(
   if (created === 0) {
     return {
       error:
-        problems.length > 0
-          ? problems.join(" ")
-          : "Nothing to generate — every active contract is already billed for that month.",
+        `Nothing was generated. ${perLocation.join(" · ")}` +
+        (problems.length ? ` ${problems.join(" ")}` : ""),
     };
   }
 
   return {
     success:
-      `Generated ${created} draft invoice${created === 1 ? "" : "s"}` +
-      (skipped ? `, skipped ${skipped} already billed` : "") +
-      (problems.length ? `. Check: ${problems.join(" ")}` : "."),
+      `${perLocation.join(" · ")}.` +
+      (problems.length ? ` Check: ${problems.join(" ")}` : ""),
   };
 }
 
@@ -511,7 +697,8 @@ type UtilityPeriodRow = {
   utility: string;
   provider_amount: string;
   provider_consumption: string;
-  genset_expense: string;
+  manual_rate: string | null;
+  extra_expense: string;
   is_locked: boolean;
   locations: { code: string } | null;
 };
@@ -541,6 +728,8 @@ type ContractForBilling = {
     label: string | null;
     amount: string | null;
     sort_order: number;
+    tax_treatment: TaxTreatment;
+    vat_mode: VatMode | null;
   }[];
 };
 
