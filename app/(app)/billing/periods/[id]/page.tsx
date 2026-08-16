@@ -4,7 +4,7 @@ import { notFound } from "next/navigation";
 
 import { Card, PageHeader } from "@/components/ui";
 import { requirePermission } from "@/lib/auth";
-import { derivedRate } from "@/lib/billing";
+import { effectiveRate } from "@/lib/billing";
 import { formatDate } from "@/lib/format";
 import { MODULE, can } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
@@ -23,7 +23,8 @@ type PeriodDetail = {
   period_end: string;
   provider_amount: string;
   provider_consumption: string;
-  genset_expense: string;
+  manual_rate: number | null;
+  extra_expense: string;
   is_locked: boolean;
   notes: string | null;
   locations: { code: string; name: string } | null;
@@ -56,7 +57,7 @@ export default async function UtilityPeriodPage({
   const { data: period } = await supabase
     .from("utility_periods")
     .select(
-      "id, company_id, location_id, utility, period_start, period_end, provider_amount, provider_consumption, genset_expense, is_locked, notes, locations(code, name)",
+      "id, company_id, location_id, utility, period_start, period_end, provider_amount, provider_consumption, manual_rate, extra_expense, is_locked, notes, locations(code, name)",
     )
     .eq("id", id)
     .maybeSingle<PeriodDetail>();
@@ -133,10 +134,12 @@ export default async function UtilityPeriodPage({
     0,
   );
 
-  const rate = derivedRate(
-    Number(period.provider_amount),
-    Number(period.provider_consumption),
-  );
+  // What tenants are charged, which is the period's own rate where one is set.
+  const rate = effectiveRate({
+    providerAmount: Number(period.provider_amount),
+    providerConsumption: Number(period.provider_consumption),
+    manualRate: period.manual_rate === null ? null : Number(period.manual_rate),
+  });
 
   return (
     <>
@@ -168,7 +171,7 @@ export default async function UtilityPeriodPage({
       <div className="mb-6">
         <Card
           title="Provider bill"
-          description="The rate charged to tenants is this bill divided by the building's total consumption."
+          description="Tenants are charged this bill divided by the building's total consumption, unless a rate is set here instead."
         >
           <ProviderBillForm
             action={updateUtilityPeriod}
@@ -189,7 +192,7 @@ export default async function UtilityPeriodPage({
           utility={period.utility}
           rows={rows}
           rate={rate}
-          gensetExpense={Number(period.genset_expense)}
+          extraExpense={Number(period.extra_expense)}
           isLocked={period.is_locked}
           canEdit={canEditReadings}
         />

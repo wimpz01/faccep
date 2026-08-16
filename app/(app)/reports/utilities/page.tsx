@@ -3,7 +3,7 @@ import type { Metadata } from "next";
 import { ReportShell, defaultRange } from "@/components/report-shell";
 import { Card, EmptyState, StatTile } from "@/components/ui";
 import { requirePermission } from "@/lib/auth";
-import { derivedRate, reconcile, round3 } from "@/lib/billing";
+import { effectiveRate, reconcile, round3 } from "@/lib/billing";
 import { formatDate, money } from "@/lib/format";
 import { MODULE } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
@@ -17,7 +17,8 @@ type PeriodRow = {
   period_end: string;
   provider_amount: string;
   provider_consumption: string;
-  genset_expense: string;
+  manual_rate: number | null;
+  extra_expense: string;
   locations: { code: string; name: string } | null;
   meter_readings: { consumption: string }[];
 };
@@ -39,7 +40,7 @@ export default async function UtilitiesReport({
   const { data: periods } = await supabase
     .from("utility_periods")
     .select(
-      "id, utility, period_start, period_end, provider_amount, provider_consumption, genset_expense, locations(code, name), meter_readings(consumption)",
+      "id, utility, period_start, period_end, provider_amount, provider_consumption, manual_rate, extra_expense, locations(code, name), meter_readings(consumption)",
     )
     .eq("company_id", companyId)
     .gte("period_start", from)
@@ -52,10 +53,12 @@ export default async function UtilitiesReport({
       (sum, reading) => sum + Number(reading.consumption ?? 0),
       0,
     );
-    const rate = derivedRate(
-      Number(period.provider_amount),
-      Number(period.provider_consumption),
-    );
+    const rate = effectiveRate({
+      providerAmount: Number(period.provider_amount),
+      providerConsumption: Number(period.provider_consumption),
+      manualRate:
+        period.manual_rate === null ? null : Number(period.manual_rate),
+    });
     const check = reconcile(Number(period.provider_consumption), tenantTotal);
     return {
       ...period,
@@ -91,7 +94,7 @@ export default async function UtilitiesReport({
         <StatTile
           label="Recovered from tenants"
           value={money(totalBilled)}
-          hint="At the derived rate"
+          hint="At each period's rate"
         />
         <StatTile
           label="Net recovery"

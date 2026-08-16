@@ -18,7 +18,7 @@ const periodSchema = z.object({
   period_end: z.string().min(10, "Choose the period end."),
   provider_amount: z.coerce.number().min(0, "Amount cannot be negative."),
   provider_consumption: z.coerce.number().min(0, "Consumption cannot be negative."),
-  genset_expense: z.coerce.number().min(0, "Genset expense cannot be negative."),
+  extra_expense: z.coerce.number().min(0, "The expense cannot be negative."),
   // The open-period form has no notes input, so this arrives as null.
   notes: z
     .string()
@@ -46,16 +46,13 @@ export async function createUtilityPeriod(
     period_end: formData.get("period_end"),
     provider_amount: formData.get("provider_amount") || 0,
     provider_consumption: formData.get("provider_consumption") || 0,
-    genset_expense: formData.get("genset_expense") || 0,
+    extra_expense: formData.get("extra_expense") || 0,
     notes: formData.get("notes"),
   });
   if (!parsed.success) return { error: parsed.error.issues[0].message };
 
   if (parsed.data.period_end < parsed.data.period_start) {
     return { error: "The period end must fall on or after the start." };
-  }
-  if (parsed.data.utility === "water" && parsed.data.genset_expense > 0) {
-    return { error: "Genset expense belongs on the electricity period." };
   }
 
   const supabase = await createClient();
@@ -105,7 +102,9 @@ export async function updateUtilityPeriod(
 
   const { data: before } = await supabase
     .from("utility_periods")
-    .select("provider_amount, provider_consumption, genset_expense, notes, is_locked")
+    .select(
+      "provider_amount, provider_consumption, manual_rate, extra_expense, notes, is_locked",
+    )
     .eq("id", id)
     .single();
 
@@ -113,15 +112,24 @@ export async function updateUtilityPeriod(
     return { error: "This period is locked because invoices have been released from it." };
   }
 
+  // An empty box means "charge the derived rate", which is null and not nought
+  // -- nought would bill every tenant nothing.
+  const rawRate = String(formData.get("manual_rate") ?? "").trim();
+  const manualRate = rawRate === "" ? null : Number(rawRate);
+
   const values = {
     provider_amount: Number(formData.get("provider_amount") ?? 0),
     provider_consumption: Number(formData.get("provider_consumption") ?? 0),
-    genset_expense: Number(formData.get("genset_expense") ?? 0),
+    manual_rate: manualRate,
+    extra_expense: Number(formData.get("extra_expense") ?? 0),
     notes: String(formData.get("notes") ?? "") || null,
   };
 
   if (values.provider_amount < 0 || values.provider_consumption < 0) {
     return { error: "Amounts cannot be negative." };
+  }
+  if (manualRate !== null && (!Number.isFinite(manualRate) || manualRate < 0)) {
+    return { error: "The rate charged cannot be negative." };
   }
 
   const { error } = await supabase

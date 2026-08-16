@@ -4,7 +4,7 @@ import { useActionState, useMemo, useState } from "react";
 import { useFormStatus } from "react-dom";
 
 import { FormError } from "@/components/ui";
-import { derivedRate, gensetShare, reconcile, round2, round3 } from "@/lib/billing";
+import { derivedRate, expenseShare, reconcile, round2, round3 } from "@/lib/billing";
 import { money } from "@/lib/format";
 
 import type { ActionState } from "./actions";
@@ -139,21 +139,26 @@ export function NewPeriodForm({
         />
       </div>
 
+      {/* Both utilities carry a building cost the per-unit rate does not
+          recover, so this is one field under two names. */}
       <div>
-        <label className="label" htmlFor="genset_expense">
-          Genset expense (₱)
+        <label className="label" htmlFor="extra_expense">
+          {utility === "water" ? "Water expense (₱)" : "Genset expense (₱)"}
         </label>
         <input
-          id="genset_expense"
-          name="genset_expense"
+          id="extra_expense"
+          name="extra_expense"
           type="number"
           step="0.01"
           min="0"
           className="input"
           defaultValue="0"
-          disabled={utility === "water"}
         />
-        <p className="text-xs muted mt-1">Electricity only; split by kWh share.</p>
+        <p className="text-xs muted mt-1">
+          {utility === "water"
+            ? "Pumping, tanks and treatment; split by cubic metre consumption."
+            : "Generator fuel and servicing; split by kWh consumption."}
+        </p>
       </div>
 
       <div className="sm:col-span-3 flex items-center gap-3 flex-wrap">
@@ -176,7 +181,8 @@ export function ProviderBillForm({
     utility: string;
     provider_amount: string;
     provider_consumption: string;
-    genset_expense: string;
+    manual_rate: number | null;
+    extra_expense: string;
     notes: string | null;
   };
   tenantConsumption: number;
@@ -185,16 +191,31 @@ export function ProviderBillForm({
   const [state, formAction] = useActionState<ActionState, FormData>(action, {});
   const [amount, setAmount] = useState(period.provider_amount);
   const [consumption, setConsumption] = useState(period.provider_consumption);
+  // numeric columns come back as JSON numbers, and the input state is text.
+  const [manual, setManual] = useState(
+    period.manual_rate === null ? "" : String(period.manual_rate),
+  );
 
-  const rate = derivedRate(Number(amount), Number(consumption));
+  const derived = derivedRate(Number(amount), Number(consumption));
+  /*
+   * The rate tenants are actually charged. Charging the derived rate recovers
+   * the provider's bill and not a peso more, so every unit the sub-meters
+   * missed -- corridors, pumps, line loss -- is absorbed. A rate set here is
+   * what recovers it.
+   */
+  const rate = manual.trim() === "" ? derived : Number(manual);
   const check = reconcile(Number(consumption), tenantConsumption);
   const unit = period.utility === "water" ? "cu.m" : "kWh";
 
-  // What the sub-metered consumption is worth at the derived rate, and the gap
-  // against what the provider actually charged. Signed the same way as
+  // What the sub-metered consumption is worth at the rate being charged, and
+  // the gap against what the provider billed. Signed the same way as
   // reconcile(): negative is money the company absorbs, positive is money in.
   const recovered = round2(tenantConsumption * rate);
   const shortfall = round2(recovered - (Number(amount) || 0));
+
+  // The rate that would leave nothing absorbed, offered rather than imposed.
+  const breakEven =
+    tenantConsumption > 0 ? (Number(amount) || 0) / tenantConsumption : 0;
 
   return (
     <form action={formAction} className="grid gap-4 sm:grid-cols-4">
@@ -235,30 +256,70 @@ export function ProviderBillForm({
       </div>
 
       <div>
-        <label className="label" htmlFor="genset_expense">
-          Genset expense (₱)
+        <p className="label">Derived rate</p>
+        <p
+          className="text-lg font-bold tabular-nums"
+          style={{
+            color: manual.trim()
+              ? "var(--text-muted)"
+              : "var(--color-gold-500)",
+            textDecoration: manual.trim() ? "line-through" : undefined,
+          }}
+        >
+          {derived ? `₱${derived.toFixed(4)}` : "—"}
+        </p>
+        <p className="text-xs muted">
+          per {unit}
+          {breakEven > 0
+            ? ` · ₱${breakEven.toFixed(4)} recovers the loss`
+            : ""}
+        </p>
+      </div>
+
+      {/* Leave it empty and the derived rate stands. Set it and that is what
+          tenants are charged, which is how the unmetered use is recovered. */}
+      <div>
+        <label className="label" htmlFor="manual_rate">
+          Rate charged (₱)
         </label>
         <input
-          id="genset_expense"
-          name="genset_expense"
+          id="manual_rate"
+          name="manual_rate"
+          type="number"
+          step="0.0001"
+          min="0"
+          className="input"
+          disabled={isLocked}
+          placeholder={derived ? derived.toFixed(4) : "0.0000"}
+          value={manual}
+          onChange={(event) => setManual(event.currentTarget.value)}
+        />
+        <p className="text-xs muted mt-1">
+          {manual.trim() === ""
+            ? "Empty — charging the derived rate."
+            : `Overriding: tenants charged ₱${Number(manual).toFixed(4)} per ${unit}.`}
+        </p>
+      </div>
+
+      <div>
+        <label className="label" htmlFor="extra_expense">
+          {period.utility === "water"
+            ? "Water expense (₱)"
+            : "Genset expense (₱)"}
+        </label>
+        <input
+          id="extra_expense"
+          name="extra_expense"
           type="number"
           step="0.01"
           min="0"
           className="input"
-          disabled={isLocked || period.utility === "water"}
-          defaultValue={period.genset_expense}
+          disabled={isLocked}
+          defaultValue={period.extra_expense}
         />
       </div>
 
-      <div>
-        <p className="label">Derived rate</p>
-        <p className="text-lg font-bold tabular-nums" style={{ color: "var(--color-gold-500)" }}>
-          {rate ? `₱${rate.toFixed(4)}` : "—"}
-        </p>
-        <p className="text-xs muted">per {unit}</p>
-      </div>
-
-      <div className="sm:col-span-4">
+      <div className="sm:col-span-3">
         <label className="label" htmlFor="notes">
           Notes
         </label>
@@ -298,7 +359,7 @@ export function ProviderBillForm({
                 <td className="text-sm">
                   Recovered from tenants
                   <p className="text-xs muted">
-                    Sum of the sub-meters at the derived rate.
+                    Sum of the sub-meters at ₱{rate.toFixed(4)} per {unit}.
                   </p>
                 </td>
                 <td className="text-right tabular-nums">
@@ -314,7 +375,9 @@ export function ProviderBillForm({
                   <p className="text-xs muted">
                     {shortfall <= 0
                       ? "Absorbed by the company unless it is billed some other way."
-                      : "Tenants were charged more than the provider billed. Check the readings."}
+                      : manual.trim() !== ""
+                        ? "The rate set here recovers more than the provider billed."
+                        : "Tenants were charged more than the provider billed. Check the readings."}
                   </p>
                 </td>
                 <td
@@ -370,7 +433,7 @@ export function ReadingGrid({
   utility,
   rows,
   rate,
-  gensetExpense,
+  extraExpense,
   isLocked,
   canEdit,
 }: {
@@ -379,7 +442,7 @@ export function ReadingGrid({
   utility: string;
   rows: ReadingRow[];
   rate: number;
-  gensetExpense: number;
+  extraExpense: number;
   isLocked: boolean;
   canEdit: boolean;
 }) {
@@ -405,14 +468,16 @@ export function ReadingGrid({
       perUnit: perUnit.map((row) => ({
         ...row,
         charge: row.consumption === null ? null : row.consumption * rate,
-        genset:
-          row.consumption === null || utility !== "electric"
+        // Both utilities carry one now, so the share is worked out from the
+        // consumption alone rather than from which utility this is.
+        share:
+          row.consumption === null
             ? null
-            : gensetShare(row.consumption, total, gensetExpense),
+            : expenseShare(row.consumption, total, extraExpense),
       })),
       total,
     };
-  }, [rows, values, rate, gensetExpense, utility]);
+  }, [rows, values, rate, extraExpense]);
 
   return (
     <form action={formAction}>
@@ -450,8 +515,10 @@ export function ReadingGrid({
               </th>
               <th className="text-right">Consumption</th>
               <th className="text-right">Charge</th>
-              {utility === "electric" ? (
-                <th className="text-right">Genset share</th>
+              {extraExpense > 0 ? (
+                <th className="text-right">
+                  {utility === "water" ? "Water expense" : "Genset"} share
+                </th>
               ) : null}
             </tr>
           </thead>
@@ -497,9 +564,9 @@ export function ReadingGrid({
                 <td className="text-right tabular-nums">
                   {row.charge === null ? "—" : money(row.charge)}
                 </td>
-                {utility === "electric" ? (
+                {extraExpense > 0 ? (
                   <td className="text-right tabular-nums">
-                    {row.genset === null ? "—" : money(row.genset)}
+                    {row.share === null ? "—" : money(row.share)}
                   </td>
                 ) : null}
               </tr>
@@ -514,9 +581,9 @@ export function ReadingGrid({
               <td className="text-right tabular-nums font-semibold">
                 {money(computed.total * rate)}
               </td>
-              {utility === "electric" ? (
+              {extraExpense > 0 ? (
                 <td className="text-right tabular-nums font-semibold">
-                  {money(gensetExpense)}
+                  {money(extraExpense)}
                 </td>
               ) : null}
             </tr>

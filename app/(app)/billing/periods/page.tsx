@@ -3,7 +3,7 @@ import Link from "next/link";
 
 import { Card, EmptyState, PageHeader } from "@/components/ui";
 import { requirePermission } from "@/lib/auth";
-import { derivedRate } from "@/lib/billing";
+import { effectiveRate } from "@/lib/billing";
 import { formatDate, money } from "@/lib/format";
 import { MODULE, can } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
@@ -20,7 +20,8 @@ type PeriodRow = {
   period_end: string;
   provider_amount: string;
   provider_consumption: string;
-  genset_expense: string;
+  manual_rate: number | null;
+  extra_expense: string;
   is_locked: boolean;
   invoice_lines: { invoices: { status: string } | null }[];
   locations: { code: string; name: string } | null;
@@ -37,7 +38,7 @@ export default async function UtilityPeriodsPage() {
     supabase
       .from("utility_periods")
       .select(
-        "id, utility, period_start, period_end, provider_amount, provider_consumption, genset_expense, is_locked, locations(code, name), meter_readings(count), invoice_lines(invoices(status))",
+        "id, utility, period_start, period_end, provider_amount, provider_consumption, manual_rate, extra_expense, is_locked, locations(code, name), meter_readings(count), invoice_lines(invoices(status))",
       )
       .eq("company_id", companyId)
       .order("period_start", { ascending: false })
@@ -98,10 +99,14 @@ export default async function UtilityPeriodsPage() {
               </thead>
               <tbody>
                 {periods.map((period) => {
-                  const rate = derivedRate(
-                    Number(period.provider_amount),
-                    Number(period.provider_consumption),
-                  );
+                  const rate = effectiveRate({
+                    providerAmount: Number(period.provider_amount),
+                    providerConsumption: Number(period.provider_consumption),
+                    manualRate:
+                      period.manual_rate === null
+                        ? null
+                        : Number(period.manual_rate),
+                  });
                   const unit = period.utility === "water" ? "cu.m" : "kWh";
                   return (
                     <tr key={period.id}>
@@ -125,9 +130,11 @@ export default async function UtilityPeriodsPage() {
                       </td>
                       <td className="text-right tabular-nums">
                         {money(period.provider_amount)}
-                        {Number(period.genset_expense) > 0 ? (
+                        {Number(period.extra_expense) > 0 ? (
                           <p className="text-xs muted">
-                            + {money(period.genset_expense)} genset
+                            + {money(period.extra_expense)}{" "}
+                            {period.utility === "water" ? "water" : "genset"}{" "}
+                            expense
                           </p>
                         ) : null}
                       </td>
@@ -136,6 +143,9 @@ export default async function UtilityPeriodsPage() {
                       </td>
                       <td className="text-right tabular-nums">
                         {rate ? `₱${rate.toFixed(4)}` : "—"}
+                        {period.manual_rate !== null ? (
+                          <p className="text-xs muted">set by hand</p>
+                        ) : null}
                       </td>
                       <td className="text-right tabular-nums">
                         {period.meter_readings?.[0]?.count ?? 0}
