@@ -85,42 +85,126 @@ export default async function PaymentsPage({
    * Contracts with money still held against them. Loaded only when the form
    * is open, since most visits to this page are about ordinary payments.
    */
-  const { data: fundRows } = applyingFund
-    ? await supabase
-        .from("contract_fund_status")
-        .select(
-          `contract_id, deposit_remaining, advance_remaining,
-           contracts(contract_no, status, tenants(company_name))`,
-        )
-        .eq("company_id", companyId)
-        .returns<
-          {
-            contract_id: string;
-            deposit_remaining: string;
-            advance_remaining: string;
-            contracts: {
+  const [{ data: fundContractRows }, { data: fundRows }] = applyingFund
+    ? await Promise.all([
+        // Read from the table and merge the view in by id. Asking the view for
+        // the contract's number and tenant in one go looks tidier and does not
+        // work: PostgREST cannot follow a relation out of a view, so the query
+        // errors and the list silently arrives empty.
+        supabase
+          .from("contracts")
+          .select("id, contract_no, status, tenants(company_name)")
+          .eq("company_id", companyId)
+          .returns<
+            {
+              id: string;
               contract_no: string;
               status: string;
               tenants: { company_name: string } | null;
-            } | null;
-          }[]
-        >()
-    : { data: null };
+            }[]
+          >(),
+        supabase
+          .from("contract_fund_status")
+          .select("contract_id, deposit_remaining, advance_remaining")
+          .eq("company_id", companyId)
+          .returns<
+            {
+              contract_id: string;
+              deposit_remaining: string;
+              advance_remaining: string;
+            }[]
+          >(),
+      ])
+    : [{ data: null }, { data: null }];
 
-  const fundContracts = (fundRows ?? [])
+  const heldByContract = new Map(
+    (fundRows ?? []).map((row) => [row.contract_id, row]),
+  );
+
+  const fundContracts = (fundContractRows ?? [])
+    .map((row) => {
+      const held = heldByContract.get(row.id);
+      return {
+        id: row.id,
+        contract_no: row.contract_no,
+        tenant: row.tenants?.company_name ?? "Unknown tenant",
+        status: row.status,
+        depositRemaining: Number(held?.deposit_remaining ?? 0),
+        advanceRemaining: Number(held?.advance_remaining ?? 0),
+      };
+    })
+    /*
+     * Only contracts with something left to apply. A finished contract is kept
+     * because refunding a deposit is exactly what happens when a tenancy ends,
+     * and a contract that still holds money is the one you need then.
+     */
     .filter(
       (row) =>
-        row.contracts?.status === "active" &&
-        (Number(row.deposit_remaining) > 0 || Number(row.advance_remaining) > 0),
+        row.status !== "draft" &&
+        (row.depositRemaining > 0 || row.advanceRemaining > 0),
     )
-    .map((row) => ({
-      id: row.contract_id,
-      contract_no: row.contracts?.contract_no ?? "",
-      tenant: row.contracts?.tenants?.company_name ?? "Unknown tenant",
-      depositRemaining: Number(row.deposit_remaining),
-      advanceRemaining: Number(row.advance_remaining),
-    }))
     .sort((a, b) => a.tenant.localeCompare(b.tenant));
+
+  /*
+   * Contracts the receipt form can attach a deposit or a refund to. Every
+   * contract is offered, not only those with money held: recording a deposit
+   * is precisely what you do when none is held yet.
+   */
+  const [{ data: depositContractRows }, { data: depositFundRows }] = adding
+    ? await Promise.all([
+        // Read from the table, not from contract_fund_status: the status is a
+        // view, and PostgREST cannot follow a relation out of it.
+        supabase
+          .from("contracts")
+          // Every contract, whatever its state: a deposit is received on a new
+          // one and refunded on a finished one.
+          .select("id, contract_no, tenant_id, status, contract_units(units(code))")
+          .eq("company_id", companyId)
+          .order("contract_no")
+          .returns<
+            {
+              id: string;
+              contract_no: string;
+              tenant_id: string;
+              status: string;
+              contract_units: { units: { code: string } | null }[];
+            }[]
+          >(),
+        supabase
+          .from("contract_fund_status")
+          .select("contract_id, deposit_taken, deposit_received, deposit_remaining")
+          .eq("company_id", companyId)
+          .returns<
+            {
+              contract_id: string;
+              deposit_taken: string;
+              deposit_received: string;
+              deposit_remaining: string;
+            }[]
+          >(),
+      ])
+    : [{ data: null }, { data: null }];
+
+  const fundByContract = new Map(
+    (depositFundRows ?? []).map((row) => [row.contract_id, row]),
+  );
+  const depositContracts = (depositContractRows ?? []).map((row) => {
+    const fund = fundByContract.get(row.id);
+    return {
+      id: row.id,
+      tenant_id: row.tenant_id,
+      contract_no: row.contract_no,
+      unitLabel:
+        (row.contract_units ?? [])
+          .map((link) => link.units?.code)
+          .filter(Boolean)
+          .join(", ") || "no unit",
+      agreed: Number(fund?.deposit_taken ?? 0),
+      received: Number(fund?.deposit_received ?? 0),
+      remaining: Number(fund?.deposit_remaining ?? 0),
+    };
+  });
+
   const posted = rows.filter((row) => row.status === "posted");
   const thisMonth = new Date().toISOString().slice(0, 7);
   const collectedThisMonth = posted
@@ -207,6 +291,7 @@ export default async function PaymentsPage({
               action={recordPayment}
               tenants={tenants ?? []}
               openInvoices={openInvoices}
+              contracts={depositContracts}
             />
           </Card>
         </div>

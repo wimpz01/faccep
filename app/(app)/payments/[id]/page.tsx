@@ -69,9 +69,21 @@ export default async function PaymentDetailPage({
         title={payment.payment_no}
         description={`${payment.tenants?.company_name ?? "Unknown tenant"} · ${formatDate(payment.payment_date)}`}
         action={
-          <Link href="/payments" className="btn btn-secondary btn-sm">
-            Back
-          </Link>
+          <div className="flex gap-2">
+            {/* Money out gets a voucher for the payee to sign; money in
+                already has its receipt. */}
+            {payment.payment_kind === "refund" ? (
+              <Link
+                href={`/payments/${payment.id}/voucher`}
+                className="btn btn-primary btn-sm"
+              >
+                Print voucher
+              </Link>
+            ) : null}
+            <Link href="/payments" className="btn btn-secondary btn-sm">
+              Back
+            </Link>
+          </div>
         }
       />
 
@@ -192,7 +204,11 @@ export default async function PaymentDetailPage({
             </div>
           ) : (
             <EmptyState>
-              Not applied to any invoice — this sits as an unapplied credit.
+              {/* A refund settles no invoice by design; calling it an
+                  unapplied credit describes a collection, not a payout. */}
+              {payment.payment_kind === "refund"
+                ? "Money paid out, so it settles no invoice. Print the voucher for the payee to sign."
+                : "Not applied to any invoice — this sits as an unapplied credit."}
             </EmptyState>
           )}
         </Card>

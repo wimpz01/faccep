@@ -106,9 +106,10 @@ export function FundApplicationForm({
           className="select"
           defaultValue="applied"
         >
-          <option value="applied">Applied to a bill</option>
-          <option value="refunded">Refunded to the tenant</option>
-          <option value="forfeited">Forfeited</option>
+          {/* Refund and forfeiture are gone from here on purpose: both are
+              now settlement decisions, and recording one here as well drew
+              the deposit down twice and posted nothing to the ledger. */}
+          <option value="applied">Deducted — repair, damage or a bill</option>
         </select>
       </div>
 
@@ -149,7 +150,7 @@ export function FundApplicationForm({
           id="fund-note"
           name="note"
           className="input"
-          placeholder="Applied to March rent"
+          placeholder="Repair to shopfront glass"
         />
       </div>
 

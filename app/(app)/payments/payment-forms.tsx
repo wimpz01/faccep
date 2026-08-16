@@ -44,24 +44,51 @@ function Result({ state }: { state: ActionState }) {
   );
 }
 
+/** A contract of the chosen tenant, and where its deposit stands. */
+export type DepositContract = {
+  id: string;
+  tenant_id: string;
+  contract_no: string;
+  unitLabel: string;
+  agreed: number;
+  received: number;
+  remaining: number;
+};
+
 export function RecordPaymentForm({
   action,
   tenants,
   openInvoices,
+  contracts = [],
 }: {
   action: (state: ActionState, formData: FormData) => Promise<ActionState>;
   tenants: TenantOption[];
   openInvoices: OpenInvoice[];
+  contracts?: DepositContract[];
 }) {
   const [state, formAction] = useActionState<ActionState, FormData>(action, {});
   const [tenantId, setTenantId] = useState("");
+  const [contractId, setContractId] = useState("");
   const [amount, setAmount] = useState("");
   const [kind, setKind] = useState("payment");
   const [mode, setMode] = useState("cash");
+  const [fundKind, setFundKind] = useState("security_deposit");
   const [postdated, setPostdated] = useState(false);
   const [applied, setApplied] = useState<Record<string, string>>({});
 
   const isCheque = mode === "check";
+  /*
+   * A deposit is held against one contract, not against the tenant at large:
+   * each unit is its own contract and carries its own deposit. A refund then
+   * names the deposit it is returning, which is what lets the contract record
+   * and the ledger stay in step.
+   */
+  const againstContract = kind === "deposit" || kind === "refund";
+  const tenantContracts = useMemo(
+    () => contracts.filter((row) => row.tenant_id === tenantId),
+    [contracts, tenantId],
+  );
+  const chosenContract = tenantContracts.find((row) => row.id === contractId);
   // A postdated cheque is a promise, not cash. It is tracked against the
   // tenant until it clears, so it settles nothing on the way in.
   const isPostdated = isCheque && postdated;
@@ -153,6 +180,7 @@ export function RecordPaymentForm({
           onChange={(event) => {
             setTenantId(event.currentTarget.value);
             setApplied({});
+            setContractId("");
           }}
         >
           <option value="">Choose…</option>
@@ -163,6 +191,66 @@ export function RecordPaymentForm({
           ))}
         </select>
       </div>
+
+      {againstContract ? (
+        <div className="sm:col-span-2">
+          <label className="label" htmlFor="contract_id">
+            Contract * — which deposit
+          </label>
+          <select
+            id="contract_id"
+            name="contract_id"
+            className="select"
+            required
+            value={contractId}
+            onChange={(event) => setContractId(event.currentTarget.value)}
+          >
+            <option value="">
+              {tenantId ? "Choose a contract…" : "Choose a tenant first"}
+            </option>
+            {tenantContracts.map((row) => (
+              <option key={row.id} value={row.id}>
+                {row.contract_no} — {row.unitLabel}
+              </option>
+            ))}
+          </select>
+          <p className="text-xs muted mt-1">
+            {!chosenContract
+              ? "A deposit belongs to one contract, and each unit has its own."
+              : kind === "refund"
+                ? `${money(chosenContract.remaining)} held on this contract — the most that can be returned.`
+                : `Agreed ${money(chosenContract.agreed)} · received so far ${money(chosenContract.received)}.`}
+          </p>
+        </div>
+      ) : null}
+
+      {/* Which fund is going back. The deposit route goes through a settlement
+          so the amount is already decided; an advance has nothing to deduct. */}
+      {kind === "refund" ? (
+        <div>
+          <label className="label" htmlFor="fund_kind">
+            Returning *
+          </label>
+          <select
+            id="fund_kind"
+            name="fund_kind"
+            className="select"
+            value={fundKind}
+            onChange={(event) => {
+              const next = event.currentTarget.value;
+              setFundKind(next);
+            }}
+          >
+            <option value="security_deposit">Security deposit</option>
+            <option value="advance_payment">Advance / prepayment</option>
+          </select>
+          <p className="text-xs muted mt-1">
+            {fundKind === "security_deposit"
+              ? "Needs an approved settlement; the refundable figure comes from it."
+              : "Bounded by what is left of the advance."}
+          </p>
+        </div>
+      ) : null}
 
       <div>
         <label className="label" htmlFor="amount">
@@ -485,7 +573,7 @@ export function VoidRequestForm({
           name="reason"
           className="input"
           required
-          placeholder="Cheque bounced"
+          placeholder="Wrong amount — recording it again"
         />
       </div>
       <div className="flex items-center gap-3 flex-wrap">

@@ -15,7 +15,12 @@ export type ActionState = { error?: string; success?: string };
 
 const paymentSchema = z.object({
   tenant_id: z.string().uuid("Choose a tenant."),
+  // Required on a deposit or a refund: each unit is its own contract and
+  // carries its own deposit, so the receipt has to say which one it is.
+  contract_id: z.string().uuid().nullish().or(z.literal("")),
   payment_kind: z.enum(["payment", "prepayment", "deposit", "refund"]),
+  // Only a refund carries one; the database refuses it on anything else.
+  fund_kind: z.enum(["security_deposit", "advance_payment"]).nullish().or(z.literal("")),
   payment_mode: z.enum(["cash", "gcash", "check", "bank_transfer"]),
   payment_date: z.string().min(10, "Choose the payment date."),
   amount: z.coerce.number().positive("Enter an amount greater than zero."),
@@ -45,7 +50,9 @@ export async function recordPayment(
 
   const parsed = paymentSchema.safeParse({
     tenant_id: formData.get("tenant_id"),
+    contract_id: formData.get("contract_id"),
     payment_kind: formData.get("payment_kind"),
+    fund_kind: formData.get("fund_kind"),
     payment_mode: formData.get("payment_mode"),
     payment_date: formData.get("payment_date"),
     amount: formData.get("amount"),
@@ -138,13 +145,19 @@ export async function recordPayment(
   }
   // A deposit is held against the tenant and a refund settles nothing, so
   // neither may be applied to a bill.
-  if (
-    (parsed.data.payment_kind === "deposit" ||
-      parsed.data.payment_kind === "refund") &&
-    applications.length > 0
-  ) {
+  const heldAgainstContract =
+    parsed.data.payment_kind === "deposit" ||
+    parsed.data.payment_kind === "refund";
+  if (heldAgainstContract && applications.length > 0) {
     return {
       error: `A ${parsed.data.payment_kind} cannot be applied to an invoice — it is held against the tenant, not against a bill.`,
+    };
+  }
+  // The database refuses these too; asking here gives a plain sentence rather
+  // than a constraint message.
+  if (heldAgainstContract && !parsed.data.contract_id) {
+    return {
+      error: `Choose the contract this ${parsed.data.payment_kind} belongs to — each unit carries its own deposit.`,
     };
   }
 
@@ -153,6 +166,12 @@ export async function recordPayment(
     .insert({
       company_id: companyId,
       ...parsed.data,
+      contract_id: parsed.data.contract_id || null,
+      // Carried only on a refund; the database refuses it on anything else.
+      fund_kind:
+        parsed.data.payment_kind === "refund"
+          ? parsed.data.fund_kind || "security_deposit"
+          : null,
       reference: parsed.data.reference || null,
       notes: parsed.data.notes || null,
       // Only meaningful on a cheque, and an empty string is not a date.
