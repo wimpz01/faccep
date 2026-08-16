@@ -44,6 +44,7 @@ export default async function PurchaseRequestsPage({
     { data: items },
     { data: expenseAccounts },
     { data: locations },
+    { data: jobs },
   ] = await Promise.all([
     supabase
       .from("purchase_requests")
@@ -56,7 +57,7 @@ export default async function PurchaseRequestsPage({
       .returns<RequestRow[]>(),
     supabase
       .from("inventory_items")
-      .select("id, name, unit_of_measure")
+      .select("id, name, sku, unit_of_measure, quantity_on_hand")
       .eq("company_id", companyId)
       .eq("is_active", true)
       .order("name"),
@@ -74,6 +75,29 @@ export default async function PurchaseRequestsPage({
       .eq("company_id", companyId)
       .eq("is_active", true)
       .order("code"),
+    /*
+     * Jobs a request could still be buying for. A closed job is left out: the
+     * work is done and paid for, and offering it invites the spend to be hung
+     * on the wrong one. Existing links are unaffected -- this is only what the
+     * picker offers.
+     */
+    supabase
+      .from("maintenance_jobs")
+      .select("id, job_no, job_kind, description, status, location_id")
+      .eq("company_id", companyId)
+      .not("status", "in", "(closed,cancelled)")
+      .order("job_no", { ascending: false })
+      .limit(200)
+      .returns<
+        {
+          id: string;
+          job_no: string;
+          job_kind: string;
+          description: string | null;
+          status: string;
+          location_id: string | null;
+        }[]
+      >(),
   ]);
 
   const rows = requests ?? [];
@@ -167,9 +191,20 @@ export default async function PurchaseRequestsPage({
           >
             <PurchaseRequestForm
               action={createPurchaseRequest}
-              items={items ?? []}
+              items={(items ?? []).map((item) => ({
+                ...item,
+                onHand: Number(item.quantity_on_hand ?? 0),
+              }))}
               expenseAccounts={expenseAccounts ?? []}
               locations={locations ?? []}
+              jobs={(jobs ?? []).map((job) => ({
+                id: job.id,
+                job_no: job.job_no,
+                label:
+                  job.description?.trim() ||
+                  job.job_kind.replace(/_/g, " "),
+                location_id: job.location_id,
+              }))}
             />
           </Card>
         </div>

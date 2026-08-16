@@ -22,6 +22,7 @@ import {
   releaseVoucher,
   submitVoucherForApproval,
 } from "./actions";
+import { BillList } from "./bill-list";
 import { isReversal, voucherKindLabel } from "./constants";
 import {
   SupplierInvoiceForm,
@@ -103,14 +104,24 @@ const TAB_VOUCHERS = "vouchers";
 export default async function PayablesPage({
   searchParams,
 }: {
-  searchParams: Promise<{ tab?: string; view?: string; receipt?: string }>;
+  searchParams: Promise<{
+    tab?: string;
+    view?: string;
+    receipt?: string;
+    sort?: string;
+  }>;
 }) {
-  const { tab, view, receipt } = await searchParams;
+  const { tab, view, receipt, sort } = await searchParams;
   const context = await requirePermission(MODULE.payablesInvoices, "view");
   const companyId = context.activeCompany!.companyId;
   const canRecord = can(context.permissions, MODULE.payablesInvoices, "edit");
   const canPrepare = can(context.permissions, MODULE.payablesVouchers, "edit");
   const canRelease = can(context.permissions, MODULE.payablesPayments, "approve");
+  // What the company spends per building is a management figure, not part of
+  // the job of entering and settling bills. Same rule as stock value.
+  const canSeeSpend = Boolean(
+    context.isSuperAdmin || context.activeCompany?.isCompanyAdmin,
+  );
 
   // Billing a receipt lands on the recording form with the goods already on it.
   const active = receipt
@@ -374,6 +385,25 @@ export default async function PayablesPage({
         : view === "withheld"
           ? "invoices with tax withheld"
           : null;
+
+  /*
+   * Ordered by the date the bill was raised, newest first, because a list of
+   * transactions is nearly always read for the most recent one. Clicking the
+   * column heading turns it around; the order lives in the URL, so the view
+   * survives a refresh and can be sent to somebody else.
+   *
+   * Same-day bills fall back to their own number, which is issued in order --
+   * without it a day's worth of bills would shuffle between page loads.
+   */
+  const dateAscending = sort === "date_asc";
+  const sortedBills = [...shownBills].sort((a, b) => {
+    const byDate = a.invoice_date.localeCompare(b.invoice_date);
+    const settled = byDate !== 0 ? byDate : a.bill_no.localeCompare(b.bill_no);
+    return dateAscending ? settled : -settled;
+  });
+  const dateSortHref = `/payables?tab=${TAB_INVOICES}${
+    view ? `&view=${view}` : ""
+  }&sort=${dateAscending ? "date_desc" : "date_asc"}`;
   const withheld = rows.reduce(
     (sum, bill) => sum + Number(bill.withholding_tax),
     0,
@@ -592,7 +622,7 @@ export default async function PayablesPage({
         </div>
       ) : null}
 
-      {active === TAB_INVOICES && byProperty.length > 0 ? (
+      {active === TAB_INVOICES && canSeeSpend && byProperty.length > 0 ? (
         <div className="mb-6">
           <Card
             title="Spend by property"
@@ -651,77 +681,37 @@ export default async function PayablesPage({
 
       {active === TAB_INVOICES ? (
         <Card title="Supplier invoices" bodyClassName="">
-          {shownBills.length > 0 ? (
-            <div className="table-scroll">
-              <table className="table">
-                <thead>
-                  <tr>
-                    <th>Invoice</th>
-                    <th>Supplier</th>
-                    <th>Due</th>
-                    <th className="text-right">Total</th>
-                    <th className="text-right">Paid</th>
-                    <th className="text-right">Balance</th>
-                    <th>Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {shownBills.map((bill) => {
-                    const balance = round2(
-                      Number(bill.total) - Number(bill.amount_paid),
-                    );
-                    const isOverdue =
-                      balance > 0 && bill.due_date < today && bill.status !== "paid";
-                    return (
-                      <tr key={bill.id}>
-                        <td>
-                          <Link
-                            href={`/payables/invoices/${bill.id}`}
-                            className="font-semibold text-sm tabular-nums"
-                            style={{ color: "var(--color-brand-600)" }}
-                          >
-                            {bill.bill_no}
-                          </Link>
-                          <p className="text-xs muted">
-                            Supplier ref. {bill.invoice_no}
-                            {" · "}
-                            {bill.locations
-                              ? bill.locations.code
-                              : "Company-wide"}
-                          </p>
-                          {bill.maintenance_jobs?.job_no ? (
-                            <p className="text-xs muted">
-                              {bill.maintenance_jobs.job_no} (
-                              {bill.maintenance_jobs.job_kind})
-                            </p>
-                          ) : null}
-                        </td>
-                        <td className="text-sm">{bill.vendors?.name ?? "—"}</td>
-                        <td className="text-xs">
-                          {formatDate(bill.due_date)}
-                          {isOverdue ? (
-                            <p style={{ color: "var(--danger)" }}>overdue</p>
-                          ) : null}
-                        </td>
-                        <td className="text-right tabular-nums">{money(bill.total)}</td>
-                        <td className="text-right tabular-nums">
-                          {money(bill.amount_paid)}
-                        </td>
-                        <td className="text-right tabular-nums">{money(balance)}</td>
-                        <td>
-                          <span className="badge">
-                            {bill.status.replace("_", " ")}
-                          </span>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <EmptyState>No supplier invoices recorded yet.</EmptyState>
-          )}
+          <BillList
+            dateSortHref={dateSortHref}
+            dateAscending={dateAscending}
+            rows={sortedBills.map((bill) => {
+              const balance = round2(
+                Number(bill.total) - Number(bill.amount_paid),
+              );
+              return {
+                id: bill.id,
+                bill_no: bill.bill_no,
+                invoice_no: bill.invoice_no,
+                supplier: bill.vendors?.name ?? "—",
+                locationLabel: bill.locations
+                  ? bill.locations.code
+                  : "Company-wide",
+                jobLabel: bill.maintenance_jobs?.job_no
+                  ? `${bill.maintenance_jobs.job_no} (${bill.maintenance_jobs.job_kind})`
+                  : null,
+                invoice_date: bill.invoice_date,
+                due_date: bill.due_date,
+                total: Number(bill.total),
+                paid: Number(bill.amount_paid),
+                balance,
+                status: bill.status,
+                isOverdue:
+                  balance > 0 &&
+                  bill.due_date < today &&
+                  bill.status !== "paid",
+              };
+            })}
+          />
         </Card>
       ) : null}
 

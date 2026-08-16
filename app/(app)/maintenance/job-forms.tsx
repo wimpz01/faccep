@@ -3,6 +3,7 @@
 import { useActionState, useRef, useState, useTransition } from "react";
 import { useFormStatus } from "react-dom";
 
+import { ItemPicker } from "@/components/item-picker";
 import { FormError } from "@/components/ui";
 import { createClient } from "@/lib/supabase/client";
 
@@ -16,6 +17,20 @@ export type ItemOption = {
   unit_of_measure: string;
   quantity_on_hand: string;
 };
+
+/** Small enough to sit in a row of buttons rather than below them. */
+function SubmitSmall({ label, disabled }: { label: string; disabled?: boolean }) {
+  const { pending } = useFormStatus();
+  return (
+    <button
+      type="submit"
+      className="btn btn-primary btn-sm"
+      disabled={pending || disabled}
+    >
+      {pending ? "Saving…" : label}
+    </button>
+  );
+}
 
 function Submit({ label }: { label: string }) {
   const { pending } = useFormStatus();
@@ -284,47 +299,114 @@ export function MaterialRequestForm({
   items: ItemOption[];
 }) {
   const [state, formAction] = useActionState<ActionState, FormData>(action, {});
+  const [picking, setPicking] = useState(false);
+  const [picked, setPicked] = useState<string[]>([]);
+
+  /*
+   * Only what has been picked appears. Listing the whole catalogue with a box
+   * against every line made a job needing two things look like a stocktake,
+   * and grew unusable as the inventory did.
+   */
+  const chosen = picked
+    .map((id) => items.find((item) => item.id === id))
+    .filter((item): item is ItemOption => Boolean(item));
 
   return (
     <form action={formAction}>
       <input type="hidden" name="job_id" value={jobId} />
-      <div className="table-scroll">
-        <table className="table">
-          <thead>
-            <tr>
-              <th>Item</th>
-              <th className="text-right">On hand</th>
-              <th className="text-right" style={{ width: "10rem" }}>
-                Request
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {items.map((item) => (
-              <tr key={item.id}>
-                <td className="text-sm">{item.name}</td>
-                <td className="text-right tabular-nums">
-                  {Number(item.quantity_on_hand)} {item.unit_of_measure}
-                </td>
-                <td className="text-right">
-                  <input
-                    name={`qty:${item.id}`}
-                    type="number"
-                    step="0.001"
-                    min="0"
-                    className="input tabular-nums"
-                    style={{ textAlign: "right" }}
-                  />
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <div className="mt-3 flex items-center gap-3 flex-wrap">
-        <Submit label="Raise material request" />
+
+      {picking ? (
+        <ItemPicker
+          items={items.map((item) => ({
+            id: item.id,
+            name: item.name,
+            unit_of_measure: item.unit_of_measure,
+            onHand: Number(item.quantity_on_hand ?? 0),
+          }))}
+          onAdd={(item) =>
+            setPicked((current) =>
+              current.includes(item.id) ? current : [...current, item.id],
+            )
+          }
+          onClose={() => setPicking(false)}
+        />
+      ) : null}
+
+      {/* Picking and saving sit together: they are the two things done
+          here, and the save should not be hunted for below the table. */}
+      <div className="flex items-center gap-2 flex-wrap mb-2">
+        <button
+          type="button"
+          className="btn btn-secondary btn-sm"
+          onClick={() => setPicking(true)}
+          disabled={items.length === 0}
+        >
+          + Add items
+        </button>
+        <SubmitSmall label="Raise material request" disabled={chosen.length === 0} />
         <Result state={state} />
       </div>
+
+      {chosen.length > 0 ? (
+        <div className="table-scroll">
+          <table className="table">
+            <thead>
+              <tr>
+                <th style={{ width: "2.5rem" }} className="text-right">#</th>
+                <th>Item</th>
+                <th className="text-right">On hand</th>
+                <th className="text-right" style={{ width: "10rem" }}>
+                  Request
+                </th>
+                <th style={{ width: "3rem" }} />
+              </tr>
+            </thead>
+            <tbody>
+              {chosen.map((item, index) => (
+                <tr key={item.id}>
+                  <td className="text-right tabular-nums text-xs muted">
+                    {index + 1}
+                  </td>
+                  <td className="text-sm">{item.name}</td>
+                  <td className="text-right tabular-nums">
+                    {Number(item.quantity_on_hand)} {item.unit_of_measure}
+                  </td>
+                  <td className="text-right">
+                    <input
+                      name={`qty:${item.id}`}
+                      type="number"
+                      step="0.001"
+                      min="0"
+                      className="input tabular-nums"
+                      style={{ textAlign: "right" }}
+                      autoFocus
+                    />
+                  </td>
+                  <td className="text-right">
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      aria-label={`Remove ${item.name}`}
+                      onClick={() =>
+                        setPicked((current) =>
+                          current.filter((id) => id !== item.id),
+                        )
+                      }
+                    >
+                      ×
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <p className="text-sm muted">
+          Nothing picked yet — use “+ Add items” to choose what the job needs.
+        </p>
+      )}
+
     </form>
   );
 }

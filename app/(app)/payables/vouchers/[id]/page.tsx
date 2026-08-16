@@ -55,6 +55,9 @@ type VoucherDetail = {
       bill_no: string;
       invoice_no: string;
       invoice_date: string;
+      amount: string;
+      vat_amount: string;
+      withholding_tax: string;
       total: string;
     } | null;
   }[];
@@ -124,7 +127,7 @@ export default async function VoucherDocumentPage({
          notes, released_at,
          vendors(name, vendor_no, tin, address),
          voucher_lines(id, amount, supplier_invoice_id,
-           supplier_invoices(bill_no, invoice_no, invoice_date, total))`,
+           supplier_invoices(bill_no, invoice_no, invoice_date, amount, vat_amount, withholding_tax, total))`,
       )
       .eq("id", id)
       .maybeSingle<VoucherDetail>(),
@@ -141,6 +144,35 @@ export default async function VoucherDocumentPage({
   const applied = lines.reduce((sum, line) => sum + Number(line.amount), 0);
   const amount = Number(voucher.amount);
   const withheld = Number(voucher.withholding_tax ?? 0);
+
+  /*
+   * Tax is usually withheld when the bill is recorded, not when the cheque is
+   * cut, so the voucher's own withholding is nil and the cheque simply reads
+   * short of the supplier's invoice. Carrying the bills' figures onto the
+   * voucher lets it show the sum billed and the tax held back against it --
+   * which is what the supplier is querying when the cheque does not match
+   * their invoice.
+   *
+   * Pro-rated, so a voucher settling half a bill claims half its withholding
+   * rather than all of it.
+   */
+  const settled = lines.reduce(
+    (totals, line) => {
+      const bill = line.supplier_invoices;
+      if (!bill) return totals;
+      const billTotal = Number(bill.total) || 0;
+      const share = billTotal > 0 ? Number(line.amount) / billTotal : 0;
+      return {
+        gross:
+          totals.gross +
+          (Number(bill.amount) + Number(bill.vat_amount)) * share,
+        withheld: totals.withheld + Number(bill.withholding_tax) * share,
+      };
+    },
+    { gross: 0, withheld: 0 },
+  );
+  const withheldOnBills = round2(settled.withheld);
+  const grossSettled = round2(settled.gross);
 
   const canPrepare = can(context.permissions, MODULE.payablesVouchers, "edit");
   const canRelease = can(context.permissions, MODULE.payablesPayments, "approve");
@@ -217,6 +249,16 @@ export default async function VoucherDocumentPage({
           <Link href="/payables?tab=vouchers" className="btn btn-secondary btn-sm">
             Back to vouchers
           </Link>
+          {/* Only where tax was actually held back is there anything to
+              certify. */}
+          {withheldOnBills > 0 || withheld > 0 ? (
+            <Link
+              href={`/payables/vouchers/${voucher.id}/form-2307`}
+              className="btn btn-secondary btn-sm"
+            >
+              BIR Form 2307
+            </Link>
+          ) : null}
           <PrintButton />
         </div>
       </div>
@@ -319,11 +361,22 @@ export default async function VoucherDocumentPage({
               <th>Paid by</th>
               <td>{voucher.payment_method ?? "—"}</td>
             </tr>
-            {voucher.check_no || voucher.bank || voucher.check_date ? (
+            {/* A cheque voucher shows these whether or not they have been
+                filled in: blank tells whoever holds the paper that the cheque
+                has not been written yet, which hiding the row does not. Cash
+                and transfers keep it out of the way. */}
+            {voucher.payment_method === "check" ||
+            voucher.check_no ||
+            voucher.bank ||
+            voucher.check_date ? (
               <tr>
                 <th>Cheque no.</th>
-                <td>{voucher.check_no ?? "—"}</td>
-                <th>{voucher.voucher_kind === "prepayment" ? "Matures" : "Cheque date"}</th>
+                <td>{voucher.check_no || "—"}</td>
+                <th>
+                  {voucher.voucher_kind === "prepayment"
+                    ? "Matures"
+                    : "Cheque date"}
+                </th>
                 <td>
                   {voucher.check_date ? formatDate(voucher.check_date) : "—"}
                   {voucher.bank ? ` · ${voucher.bank}` : ""}
@@ -340,8 +393,8 @@ export default async function VoucherDocumentPage({
               <th>Bill</th>
               <th>Supplier&rsquo;s invoice</th>
               <th>Invoice date</th>
-              <th style={{ textAlign: "right" }}>Invoice total</th>
-              <th style={{ textAlign: "right" }}>Paid by this voucher</th>
+              <th style={{ textAlign: "right" }}>Document total</th>
+              <th style={{ textAlign: "right" }}>Payment amount</th>
             </tr>
           </thead>
           <tbody>
@@ -355,8 +408,13 @@ export default async function VoucherDocumentPage({
                       ? formatDate(line.supplier_invoices.invoice_date)
                       : "—"}
                   </td>
+                  {/* What the supplier billed, before any tax was held back --
+                      the figure on their own invoice. */}
                   <td style={{ textAlign: "right" }}>
-                    {money(line.supplier_invoices?.total ?? 0)}
+                    {money(
+                      Number(line.supplier_invoices?.amount ?? 0) +
+                        Number(line.supplier_invoices?.vat_amount ?? 0),
+                    )}
                   </td>
                   <td style={{ textAlign: "right" }}>{money(line.amount)}</td>
                 </tr>
@@ -369,8 +427,11 @@ export default async function VoucherDocumentPage({
               </tr>
             )}
             <tr>
-              <td colSpan={4} style={{ fontWeight: 700 }}>
+              <td colSpan={3} style={{ fontWeight: 700 }}>
                 Total
+              </td>
+              <td style={{ textAlign: "right", fontWeight: 700 }}>
+                {money(grossSettled)}
               </td>
               <td style={{ textAlign: "right", fontWeight: 700 }}>
                 {money(applied)}
@@ -381,6 +442,24 @@ export default async function VoucherDocumentPage({
 
         <table>
           <tbody>
+            {/* Where the tax was held back on the bill rather than on this
+                cheque, the voucher still has to explain why it pays less
+                than the supplier invoiced. */}
+            {withheldOnBills > 0 ? (
+              <>
+                <tr>
+                  <th style={{ width: "22%" }}>Document total</th>
+                  <td>{money(grossSettled)}</td>
+                </tr>
+                <tr>
+                  <th>Less tax withheld</th>
+                  <td>
+                    ({money(withheldOnBills)}) — creditable, covered by BIR
+                    Form 2307
+                  </td>
+                </tr>
+              </>
+            ) : null}
             <tr>
               <th style={{ width: "22%" }}>Amount</th>
               <td style={{ fontWeight: 700 }}>{money(amount)}</td>

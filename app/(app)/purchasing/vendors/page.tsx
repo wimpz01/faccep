@@ -6,7 +6,11 @@ import { requirePermission } from "@/lib/auth";
 import { MODULE, can } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
 
-import { createVendor, resendVendorApproval } from "../actions";
+import {
+  createVendor,
+  resendVendorApproval,
+  updateVendorTaxDetails,
+} from "../actions";
 import { withholdingLabel } from "../constants";
 import { VendorForm } from "../purchasing-forms";
 import { VendorList } from "../vendor-list";
@@ -23,6 +27,8 @@ type VendorRow = {
   contact_number: string | null;
   email: string | null;
   address: string | null;
+  zip_code: string | null;
+  atc_code: string | null;
   is_vatable: boolean;
   withholding: string;
   payment_terms: { name: string; days: number } | null;
@@ -50,7 +56,7 @@ export default async function VendorsPage({
     supabase
       .from("vendors")
       .select(
-        "id, vendor_no, name, status, tin, contact_person, contact_number, email, address, is_vatable, withholding, payment_terms(name, days)",
+        "id, vendor_no, name, status, tin, contact_person, contact_number, email, address, zip_code, atc_code, is_vatable, withholding, payment_terms(name, days)",
       )
       .eq("company_id", companyId)
       .order("status")
@@ -141,6 +147,8 @@ export default async function VendorsPage({
           vendor_no: vendor.vendor_no,
           name: vendor.name,
           address: vendor.address,
+          zip_code: vendor.zip_code,
+          atc_code: vendor.atc_code,
           tin: vendor.tin,
           contact_person: vendor.contact_person,
           contact_number: vendor.contact_number,
@@ -155,6 +163,7 @@ export default async function VendorsPage({
         canEdit={canEdit}
         pendingCount={pending.length}
         resendAction={resendVendorApproval}
+        taxDetailsAction={updateVendorTaxDetails}
       />
     </>
   );

@@ -6,7 +6,7 @@ import { useMemo, useState } from "react";
 import { Card, EmptyState } from "@/components/ui";
 import { money } from "@/lib/format";
 
-import { ResendApprovalForm } from "./purchasing-forms";
+import { ResendApprovalForm, VendorTaxDetailsForm } from "./purchasing-forms";
 
 import type { ActionState } from "./actions";
 
@@ -15,6 +15,8 @@ export type VendorListRow = {
   vendor_no: string;
   name: string;
   address: string | null;
+  zip_code: string | null;
+  atc_code: string | null;
   tin: string | null;
   contact_person: string | null;
   contact_number: string | null;
@@ -38,11 +40,16 @@ export function VendorList({
   canEdit,
   pendingCount,
   resendAction,
+  taxDetailsAction,
 }: {
   rows: VendorListRow[];
   canEdit: boolean;
   pendingCount: number;
   resendAction: (
+    state: ActionState,
+    formData: FormData,
+  ) => Promise<ActionState>;
+  taxDetailsAction: (
     state: ActionState,
     formData: FormData,
   ) => Promise<ActionState>;
@@ -134,7 +141,7 @@ export function VendorList({
                   <th>Terms</th>
                   <th>Tax</th>
                   <th>Status</th>
-                  {canEdit ? <th className="text-right">Move to</th> : null}
+                  {canEdit ? <th className="text-right">Details</th> : null}
                 </tr>
               </thead>
               <tbody>
@@ -224,7 +231,10 @@ export function VendorList({
                         ) : vendor.status === "rejected" ? (
                           "Declined — kept for the record"
                         ) : (
-                          "—"
+                          <VendorTaxDetailsForm
+                            action={taxDetailsAction}
+                            vendor={vendor}
+                          />
                         )}
                       </td>
                     ) : null}

@@ -268,16 +268,35 @@ export default async function PurchaseOrderDetailPage({
         </div>
       ) : null}
 
-      {order.status === "issued" && !hasReceipts && canIssue ? (
+      {/* An order that is out with the supplier and still owes something. It
+          can be withdrawn, and while nothing has arrived the issue can simply
+          be taken back instead — that keeps the order alive to correct. */}
+      {(order.status === "issued" || order.status === "partially_received") &&
+      canIssue ? (
         <div className="mb-6">
           <Card
-            title="Issued to the supplier"
-            description="Nothing has arrived yet, so the issue can still be taken back. The order returns to draft, where it can be corrected or cancelled."
+            title={
+              order.status === "issued"
+                ? "Issued to the supplier"
+                : "Part delivered"
+            }
+            description={
+              order.status === "partially_received"
+                ? "Cancelling closes the undelivered balance. What already arrived stays in stock and can still be billed."
+                : hasReceipts
+                  ? "Cancelling ends the order for good. Tell the supplier — they are holding it."
+                  : "Nothing has arrived yet, so the issue can still be taken back: the order returns to draft where it can be corrected and sent again. Cancelling instead ends it for good."
+            }
           >
-            <UnissueOrderForm
-              action={unissuePurchaseOrder}
-              poId={order.id}
-            />
+            <div className="flex items-start gap-3 flex-wrap">
+              {order.status === "issued" && !hasReceipts ? (
+                <UnissueOrderForm
+                  action={unissuePurchaseOrder}
+                  poId={order.id}
+                />
+              ) : null}
+              <CancelOrderForm action={cancelPurchaseOrder} poId={order.id} />
+            </div>
           </Card>
         </div>
       ) : null}

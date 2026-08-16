@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useMemo, useState } from "react";
 
 import { Card, EmptyState } from "@/components/ui";
@@ -138,9 +139,13 @@ export function RequestList({
                 {shown.map((request) => (
                   <tr key={request.id}>
                     <td>
-                      <span className="font-semibold text-sm">
+                      <Link
+                        href={`/purchasing/requests/${request.id}`}
+                        className="font-semibold text-sm"
+                        style={{ color: "var(--color-brand-600)" }}
+                      >
                         {request.request_no}
-                      </span>
+                      </Link>
                       {request.justification ? (
                         <p className="text-xs muted">{request.justification}</p>
                       ) : null}

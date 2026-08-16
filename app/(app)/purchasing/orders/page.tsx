@@ -27,9 +27,9 @@ type OrderRow = {
 export default async function PurchaseOrdersPage({
   searchParams,
 }: {
-  searchParams: Promise<{ view?: string; add?: string }>;
+  searchParams: Promise<{ view?: string; add?: string; sort?: string }>;
 }) {
-  const { view, add } = await searchParams;
+  const { view, add, sort } = await searchParams;
   const context = await requirePermission(MODULE.purchasingOrders, "view");
   const companyId = context.activeCompany!.companyId;
   const canEdit = can(context.permissions, MODULE.purchasingOrders, "edit");
@@ -60,7 +60,7 @@ export default async function PurchaseOrdersPage({
         .order("name"),
       supabase
         .from("inventory_items")
-        .select("id, name, unit_of_measure")
+        .select("id, name, sku, unit_of_measure, quantity_on_hand")
         .eq("company_id", companyId)
         .eq("is_active", true)
         .order("name"),
@@ -128,6 +128,38 @@ export default async function PurchaseOrdersPage({
     view === "outstanding" ? "orders still awaiting delivery" : null;
   const adding = canEdit && add === "1";
 
+  /*
+   * Sorted by order number or by the date it was raised, either way round.
+   * Newest first by default, because a list of orders is read for the recent
+   * ones; anything the URL does not name falls back to that rather than
+   * leaving the list in whatever order the database happened to return.
+   *
+   * Orders raised the same day fall back to their own number, which is issued
+   * in sequence -- without it a day's worth of orders shuffles between loads.
+   */
+  const SORTS = ["order_asc", "order_desc", "date_asc", "date_desc"] as const;
+  type Sort = (typeof SORTS)[number];
+  const activeSort: Sort = SORTS.includes(sort as Sort)
+    ? (sort as Sort)
+    : "date_desc";
+  const ascending = activeSort.endsWith("_asc");
+  const sortedBy = activeSort.startsWith("order") ? "order" : "ordered";
+
+  const sortedOrders = [...shown].sort((a, b) => {
+    const settled =
+      sortedBy === "order"
+        ? a.po_no.localeCompare(b.po_no)
+        : a.order_date.localeCompare(b.order_date) ||
+          a.po_no.localeCompare(b.po_no);
+    return ascending ? settled : -settled;
+  });
+
+  const base = `/purchasing/orders?${view ? `view=${view}&` : ""}`;
+  const sortHrefs = {
+    order: `${base}sort=${sortedBy === "order" && ascending ? "order_desc" : "order_asc"}`,
+    ordered: `${base}sort=${sortedBy === "ordered" && ascending ? "date_desc" : "date_asc"}`,
+  };
+
   return (
     <>
       <PageHeader
@@ -189,7 +221,10 @@ export default async function PurchaseOrdersPage({
           <PurchaseOrderForm
             action={createPurchaseOrder}
             vendors={vendors ?? []}
-            items={items ?? []}
+            items={(items ?? []).map((item) => ({
+            ...item,
+            onHand: Number(item.quantity_on_hand ?? 0),
+          }))}
             expenseAccounts={expenseAccounts ?? []}
             approvedRequests={approvedRequests}
             locations={locations ?? []}
@@ -206,7 +241,10 @@ export default async function PurchaseOrdersPage({
       ) : null}
 
       <OrderList
-        rows={shown.map((order) => ({
+        sortHrefs={sortHrefs}
+        sortedBy={sortedBy}
+        ascending={ascending}
+        rows={sortedOrders.map((order) => ({
           id: order.id,
           po_no: order.po_no,
           fromRequest: order.purchase_requests?.request_no ?? null,

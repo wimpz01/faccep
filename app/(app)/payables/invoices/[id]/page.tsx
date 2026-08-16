@@ -210,6 +210,16 @@ export default async function SupplierInvoicePage({
                       {money(bill.vat_amount)}
                     </td>
                   </tr>
+                  {/* What the supplier actually billed, before any tax is
+                      held back — the figure their own invoice shows. */}
+                  <tr>
+                    <td colSpan={5} className="text-right text-sm">
+                      Document total
+                    </td>
+                    <td className="text-right tabular-nums text-sm">
+                      {money(Number(bill.amount) + Number(bill.vat_amount))}
+                    </td>
+                  </tr>
                   {Number(bill.withholding_tax) > 0 ? (
                     <tr>
                       <td colSpan={5} className="text-right text-sm">

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useActionState, useState } from "react";
 import { useFormStatus } from "react-dom";
 
+import { ItemPicker } from "@/components/item-picker";
 import { FormError } from "@/components/ui";
 import { money } from "@/lib/format";
 
@@ -11,7 +12,14 @@ import type { ActionState } from "./actions";
 import { WITHHOLDING_KINDS } from "./constants";
 
 export type VendorOption = { id: string; name: string };
-export type ItemOption = { id: string; name: string; unit_of_measure: string };
+export type ItemOption = {
+  id: string;
+  name: string;
+  unit_of_measure: string;
+  /** Shown while picking, because what to order depends on what is left. */
+  onHand?: number;
+  sku?: string | null;
+};
 export type RequestOption = {
   id: string;
   request_no: string;
@@ -78,6 +86,84 @@ export function ResendApprovalForm({
           {state.error}
         </p>
       ) : null}
+    </form>
+  );
+}
+
+/**
+ * What Form 2307 needs about a supplier, filled in after the fact.
+ *
+ * Only the boxes the certificate prints. The supplier's terms and VAT status
+ * were signed off at approval and are not editable here.
+ */
+export function VendorTaxDetailsForm({
+  action,
+  vendor,
+}: {
+  action: (state: ActionState, formData: FormData) => Promise<ActionState>;
+  vendor: {
+    id: string;
+    tin: string | null;
+    address: string | null;
+    zip_code: string | null;
+    atc_code: string | null;
+  };
+}) {
+  const [state, formAction] = useActionState<ActionState, FormData>(action, {});
+  const [open, setOpen] = useState(false);
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        className="btn btn-secondary btn-sm"
+        onClick={() => setOpen(true)}
+      >
+        Tax details
+      </button>
+    );
+  }
+
+  return (
+    <form action={formAction} className="grid gap-2 text-left">
+      <input type="hidden" name="id" value={vendor.id} />
+      <input
+        name="tin"
+        className="input"
+        placeholder="TIN 000-000-000-000"
+        defaultValue={vendor.tin ?? ""}
+      />
+      <input
+        name="address"
+        className="input"
+        placeholder="Registered address"
+        defaultValue={vendor.address ?? ""}
+      />
+      <div className="flex gap-2">
+        <input
+          name="zip_code"
+          className="input"
+          placeholder="ZIP"
+          defaultValue={vendor.zip_code ?? ""}
+        />
+        <input
+          name="atc_code"
+          className="input"
+          placeholder="ATC e.g. WC640"
+          defaultValue={vendor.atc_code ?? ""}
+        />
+      </div>
+      <div className="flex items-center gap-2 flex-wrap">
+        <SubmitSmall label="Save" />
+        <button
+          type="button"
+          className="btn btn-secondary btn-sm"
+          onClick={() => setOpen(false)}
+        >
+          Close
+        </button>
+      </div>
+      <Result state={state} />
     </form>
   );
 }
@@ -160,11 +246,31 @@ export function VendorForm({
         </label>
         <input id="vendor-email" name="email" type="email" className="input" />
       </div>
-      <div className="sm:col-span-3">
+      <div className="sm:col-span-2">
         <label className="label" htmlFor="vendor-address">
-          Address
+          Registered address
         </label>
         <input id="vendor-address" name="address" className="input" />
+      </div>
+      <div>
+        <label className="label" htmlFor="vendor-zip">
+          ZIP code
+        </label>
+        <input id="vendor-zip" name="zip_code" className="input" />
+      </div>
+      <div>
+        <label className="label" htmlFor="vendor-atc">
+          ATC code
+        </label>
+        <input
+          id="vendor-atc"
+          name="atc_code"
+          className="input"
+          placeholder="WC640"
+        />
+        <p className="text-xs muted mt-1">
+          Printed on BIR Form 2307. WC640 for goods, WC158 for services.
+        </p>
       </div>
 
       <div>
@@ -250,8 +356,41 @@ function LineEditor({
   expenseAccounts: ExpenseAccountOption[];
   showPrice: boolean;
 }) {
+  const [picking, setPicking] = useState(false);
+
   function update(index: number, patch: Partial<Line>) {
     setLines(lines.map((line, i) => (i === index ? { ...line, ...patch } : line)));
+  }
+
+  /**
+   * Adds a picked item, or bumps the one already on the request.
+   *
+   * Two rows for the same item is a mistake waiting to be ordered twice, so
+   * picking it again means "one more of these" rather than a duplicate.
+   */
+  function addItem(item: ItemOption) {
+    const existing = lines.findIndex((line) => line.itemId === item.id);
+    if (existing >= 0) {
+      const current = Number(lines[existing].quantity) || 0;
+      update(existing, { quantity: String(current + 1) });
+      return;
+    }
+
+    // An untouched blank row is filled rather than left above the new line.
+    const blank = lines.findIndex(
+      (line) => !line.itemId && !line.description && !line.quantity && !line.price,
+    );
+    const filled: Line = {
+      ...EMPTY_LINE,
+      itemId: item.id,
+      description: item.name,
+      quantity: "1",
+    };
+    if (blank >= 0) {
+      setLines(lines.map((line, i) => (i === blank ? filled : line)));
+      return;
+    }
+    setLines([...lines, filled]);
   }
 
   const total = lines.reduce(
@@ -261,10 +400,38 @@ function LineEditor({
 
   return (
     <>
+      {picking ? (
+        <ItemPicker
+          items={items}
+          onAdd={addItem}
+          onClose={() => setPicking(false)}
+        />
+      ) : null}
+
+      {/* Above the lines, because this is how a line gets there. */}
+      <div className="flex gap-2 flex-wrap mb-2">
+        <button
+          type="button"
+          className="btn btn-primary btn-sm"
+          onClick={() => setPicking(true)}
+          disabled={items.length === 0}
+        >
+          + Add items
+        </button>
+        <button
+          type="button"
+          className="btn btn-secondary btn-sm"
+          onClick={() => setLines([...lines, { ...EMPTY_LINE }])}
+        >
+          Add a service line
+        </button>
+      </div>
+
       <div className="table-scroll">
         <table className="table">
           <thead>
             <tr>
+              <th style={{ width: "2.5rem" }} className="text-right">#</th>
               <th style={{ minWidth: "11rem" }}>Stock item</th>
               <th style={{ minWidth: "12rem" }}>Charge to</th>
               <th>Description</th>
@@ -287,30 +454,23 @@ function LineEditor({
           <tbody>
             {lines.map((line, index) => (
               <tr key={index}>
+                <td className="text-right tabular-nums text-xs muted">
+                  {index + 1}
+                </td>
+                {/* The item is chosen in the picker, not here, so the row
+                    states what it is rather than offering the whole catalogue
+                    on every line. The hidden field keeps what is submitted
+                    exactly as it was. */}
                 <td>
-                  <select
-                    name="line_item"
-                    className="select"
-                    value={line.itemId}
-                    onChange={(event) => {
-                      const itemId = event.currentTarget.value;
-                      const item = items.find((candidate) => candidate.id === itemId);
-                      update(index, {
-                        itemId,
-                        description: item ? item.name : line.description,
-                        // A stocked line is charged to Inventory, so any
-                        // expense account chosen earlier no longer applies.
-                        expenseAccountId: itemId ? "" : line.expenseAccountId,
-                      });
-                    }}
-                  >
-                    <option value="">Service / non-stock</option>
-                    {items.map((item) => (
-                      <option key={item.id} value={item.id}>
-                        {item.name}
-                      </option>
-                    ))}
-                  </select>
+                  <input type="hidden" name="line_item" value={line.itemId} />
+                  {line.itemId ? (
+                    <span className="text-sm font-semibold">
+                      {items.find((item) => item.id === line.itemId)?.name ??
+                        line.description}
+                    </span>
+                  ) : (
+                    <span className="text-xs muted">Service / non-stock</span>
+                  )}
                 </td>
                 <td>
                   {line.itemId ? (
@@ -399,7 +559,7 @@ function LineEditor({
               </tr>
             ))}
             <tr>
-              <td colSpan={5} className="text-right font-semibold">
+              <td colSpan={6} className="text-right font-semibold">
                 Estimated total
               </td>
               <td className="text-right tabular-nums font-semibold">{money(total)}</td>
@@ -409,13 +569,6 @@ function LineEditor({
         </table>
       </div>
 
-      <button
-        type="button"
-        className="btn btn-secondary btn-sm mt-2"
-        onClick={() => setLines([...lines, { ...EMPTY_LINE }])}
-      >
-        Add line
-      </button>
     </>
   );
 }
@@ -428,16 +581,26 @@ const EMPTY_LINE: Line = {
   expenseAccountId: "",
 };
 
+/** An open repair job this spend can be traced back to. */
+export type JobOption = {
+  id: string;
+  job_no: string;
+  label: string;
+  location_id: string | null;
+};
+
 export function PurchaseRequestForm({
   action,
   items,
   expenseAccounts,
   locations,
+  jobs = [],
 }: {
   action: (state: ActionState, formData: FormData) => Promise<ActionState>;
   items: ItemOption[];
   expenseAccounts: ExpenseAccountOption[];
   locations: LocationOption[];
+  jobs?: JobOption[];
 }) {
   const [state, formAction] = useActionState<ActionState, FormData>(action, {});
   const [lines, setLines] = useState<Line[]>([
@@ -469,6 +632,34 @@ export function PurchaseRequestForm({
             What the spend is charged against.
           </p>
         </div>
+        {/* Optional on purpose: plenty of buying answers to no repair job.
+            Where one does, naming it is what lets an auditor follow the spend
+            from the job that caused it to the order that met it. */}
+        <div>
+          <label className="label" htmlFor="pr-job">
+            Repair job
+          </label>
+          <select
+            id="pr-job"
+            name="job_id"
+            className="select"
+            defaultValue=""
+            disabled={jobs.length === 0}
+          >
+            <option value="">
+              {jobs.length === 0 ? "No open repair jobs" : "Not for a repair job"}
+            </option>
+            {jobs.map((job) => (
+              <option key={job.id} value={job.id}>
+                {job.job_no} — {job.label}
+              </option>
+            ))}
+          </select>
+          <p className="text-xs muted mt-1">
+            Optional. Links the spend to the job that caused it.
+          </p>
+        </div>
+
         <div>
           <label className="label" htmlFor="pr-needed">
             Needed by

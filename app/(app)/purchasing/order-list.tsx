@@ -27,12 +27,69 @@ export type OrderListRow = {
 };
 
 /**
+ * A column heading that turns the list around.
+ *
+ * The arrow shows the direction on the column actually in force; the other
+ * sortable column gets a faint pair so it reads as clickable without pretending
+ * to be sorted.
+ */
+function SortHeading({
+  label,
+  href,
+  active,
+  ascending,
+}: {
+  label: string;
+  href: string;
+  active: boolean;
+  ascending: boolean;
+}) {
+  return (
+    <th>
+      <Link
+        href={href}
+        style={{ color: "inherit" }}
+        title={
+          active
+            ? ascending
+              ? `Sorted by ${label.toLowerCase()}, lowest first — click to turn it around`
+              : `Sorted by ${label.toLowerCase()}, highest first — click to turn it around`
+            : `Sort by ${label.toLowerCase()}`
+        }
+      >
+        {label}{" "}
+        <span
+          style={{
+            color: active ? "var(--color-brand-600)" : "var(--text-muted)",
+            opacity: active ? 1 : 0.5,
+          }}
+        >
+          {active ? (ascending ? "▲" : "▼") : "⇅"}
+        </span>
+      </Link>
+    </th>
+  );
+}
+
+/**
  * Purchase orders, narrowing as the box is typed into.
  *
  * Every order on the page is already loaded, so the filtering happens here
- * rather than by asking the server again.
+ * rather than by asking the server again. The order they come in does not: it
+ * lives in the URL so it survives a refresh and can be handed to somebody
+ * else, which is why the headings are links rather than more state in here.
  */
-export function OrderList({ rows }: { rows: OrderListRow[] }) {
+export function OrderList({
+  rows,
+  sortHrefs,
+  sortedBy,
+  ascending,
+}: {
+  rows: OrderListRow[];
+  sortHrefs: { order: string; ordered: string };
+  sortedBy: "order" | "ordered";
+  ascending: boolean;
+}) {
   const [query, setQuery] = useState("");
 
   const terms = query
@@ -110,9 +167,19 @@ export function OrderList({ rows }: { rows: OrderListRow[] }) {
             <table className="table">
               <thead>
                 <tr>
-                  <th>Order</th>
+                  <SortHeading
+                    label="Order"
+                    href={sortHrefs.order}
+                    active={sortedBy === "order"}
+                    ascending={ascending}
+                  />
                   <th>Supplier</th>
-                  <th>Ordered</th>
+                  <SortHeading
+                    label="Ordered"
+                    href={sortHrefs.ordered}
+                    active={sortedBy === "ordered"}
+                    ascending={ascending}
+                  />
                   <th>Expected</th>
                   <th className="text-right">Total</th>
                   <th>Status</th>

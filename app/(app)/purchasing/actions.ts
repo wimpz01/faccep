@@ -112,6 +112,8 @@ const vendorSchema = z.object({
   name: z.string().trim().min(2, "Supplier name is required."),
   tin: z.string().trim().nullish().or(z.literal("")),
   address: z.string().trim().nullish().or(z.literal("")),
+  zip_code: z.string().trim().nullish().or(z.literal("")),
+  atc_code: z.string().trim().toUpperCase().nullish().or(z.literal("")),
   contact_person: z.string().trim().nullish().or(z.literal("")),
   contact_number: z.string().trim().nullish().or(z.literal("")),
   email: z.string().trim().email("Enter a valid email.").nullish().or(z.literal("")),
@@ -135,6 +137,8 @@ export async function createVendor(
     name: formData.get("name"),
     tin: formData.get("tin"),
     address: formData.get("address"),
+    zip_code: formData.get("zip_code"),
+    atc_code: formData.get("atc_code"),
     contact_person: formData.get("contact_person"),
     contact_number: formData.get("contact_number"),
     email: formData.get("email"),
@@ -202,6 +206,76 @@ export async function createVendor(
   return {
     success: `${data.vendor_no} — "${parsed.data.name}" added. It cannot be used until approved.`,
   };
+}
+
+/**
+ * Fills in what BIR Form 2307 asks for about a supplier already on file.
+ *
+ * Kept apart from the supplier's commercial terms on purpose. VAT status,
+ * withholding and payment terms were signed off when the supplier was
+ * approved, and changing those should go back through approval. A TIN, an
+ * address or an ATC is only ever the supplier telling us what to print on
+ * their certificate, so recording it needs no decision from anyone.
+ */
+export async function updateVendorTaxDetails(
+  _prevState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  try {
+    await assertPermission(MODULE.purchasingVendors, "edit");
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+
+  const parsed = z
+    .object({
+      id: z.string().uuid(),
+      tin: z.string().trim().nullish().or(z.literal("")),
+      address: z.string().trim().nullish().or(z.literal("")),
+      zip_code: z.string().trim().nullish().or(z.literal("")),
+      atc_code: z.string().trim().toUpperCase().nullish().or(z.literal("")),
+    })
+    .safeParse({
+      id: formData.get("id"),
+      tin: formData.get("tin"),
+      address: formData.get("address"),
+      zip_code: formData.get("zip_code"),
+      atc_code: formData.get("atc_code"),
+    });
+  if (!parsed.success) return { error: parsed.error.issues[0].message };
+
+  const { id, ...fields } = parsed.data;
+  const values = Object.fromEntries(
+    Object.entries(fields).map(([key, value]) => [
+      key,
+      value === "" || value == null ? null : value,
+    ]),
+  );
+
+  const supabase = await createClient();
+  const { data, error } = await supabase
+    .from("vendors")
+    .update(values)
+    .eq("id", id)
+    .select("vendor_no, name")
+    .maybeSingle();
+
+  if (error) return { error: error.message };
+  if (!data) {
+    return { error: "That supplier could not be updated from this account." };
+  }
+
+  await logAudit({
+    action: "update",
+    moduleKey: MODULE.purchasingVendors,
+    entityTable: "vendors",
+    entityId: id,
+    summary: `Updated tax details for supplier ${data.vendor_no} "${data.name}".`,
+    after: values,
+  });
+
+  revalidatePath("/purchasing/vendors");
+  return { success: `${data.vendor_no} — tax details saved.` };
 }
 
 /**
@@ -527,18 +601,24 @@ export async function issuePurchaseOrder(formData: FormData) {
 }
 
 /**
- * Ends a draft order before it ever goes out.
+ * Ends an order that still has something outstanding.
  *
- * Only a draft: an order already issued is taken back first. Refused once
- * goods have arrived or a bill exists — the database enforces the same rules,
- * so none of this can be worked around.
+ * A draft never left the building, so cancelling it is ordinary editing. An
+ * order already with the supplier is a commitment being withdrawn -- the same
+ * weight as sending it out -- so it asks for the same sign-off that issuing
+ * does. Without that, cancelling would be a way around the issue gate.
+ *
+ * On a part-delivered order this closes the undelivered balance. Goods that
+ * arrived stay in stock and can still be billed; the database enforces the
+ * same rules, so none of this can be worked around from the API.
  */
 export async function cancelPurchaseOrder(
   _prevState: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
+  let context: Awaited<ReturnType<typeof assertPermission>>;
   try {
-    await assertPermission(MODULE.purchasingOrders, "edit");
+    context = await assertPermission(MODULE.purchasingOrders, "view");
   } catch (error) {
     return { error: (error as Error).message };
   }
@@ -558,22 +638,36 @@ export async function cancelPurchaseOrder(
   if (order.status === "cancelled") {
     return { error: `${order.po_no} is already cancelled.` };
   }
-  // An order already with the supplier is taken back first, so the withdrawal
-  // and the cancellation are two separate entries in the trail.
-  if (order.status !== "draft") {
+  if (order.status === "received") {
     return {
-      error: `${order.po_no} has been issued. Take back the issue first, then cancel it.`,
+      error: `${order.po_no} has been received in full, so there is nothing outstanding to cancel.`,
     };
   }
 
-  const { error } = await supabase
+  const isDraft = order.status === "draft";
+  const needed = isDraft ? "edit" : "approve";
+  if (!can(context.permissions, MODULE.purchasingOrders, needed)) {
+    return {
+      error: isDraft
+        ? "Cancelling an order needs Edit on purchase orders."
+        : `${order.po_no} is already with the supplier. Withdrawing it needs Approve on purchase orders.`,
+    };
+  }
+
+  const { data: cancelled, error } = await supabase
     .from("purchase_orders")
     .update({
       status: "cancelled",
       notes: [order.notes, `Cancelled: ${reason}`].filter(Boolean).join(" · "),
     })
-    .eq("id", id);
+    .eq("id", id)
+    .select("id");
   if (error) return { error: error.message };
+  if (!cancelled || cancelled.length === 0) {
+    return {
+      error: `${order.po_no} was not cancelled — this account cannot write to that order.`,
+    };
+  }
 
   await logAudit({
     action: "update",
@@ -587,7 +681,12 @@ export async function cancelPurchaseOrder(
 
   revalidatePath(`/purchasing/orders/${id}`);
   revalidatePath("/purchasing/orders");
-  return { success: `${order.po_no} cancelled. Nothing more can be bought on it.` };
+  return {
+    success:
+      order.status === "partially_received"
+        ? `${order.po_no} cancelled. The undelivered balance is closed; what arrived stays in stock and can still be billed.`
+        : `${order.po_no} cancelled. Nothing more can be bought on it.`,
+  };
 }
 
 /**
