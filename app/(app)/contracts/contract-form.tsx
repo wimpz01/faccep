@@ -44,7 +44,13 @@ export type ContractValues = {
   termination_grounds?: string | null;
   notes?: string | null;
   unitIds?: string[];
-  inclusions?: { inclusion: string; label: string | null; amount: string | null }[];
+  inclusions?: {
+    inclusion: string;
+    label: string | null;
+    amount: string | null;
+    tax_treatment?: string | null;
+    vat_mode?: string | null;
+  }[];
 };
 
 function Submit({ label }: { label: string }) {
@@ -125,6 +131,108 @@ function UtilityBlock({
           defaultValue={defaultMinimum}
         />
       </div>
+    </div>
+  );
+}
+
+/** How a billing item is taxed. Only VATable attracts any. */
+const TAX_TREATMENTS = [
+  { value: "vatable", label: "VATable" },
+  { value: "non_vat", label: "Non-VAT" },
+  { value: "vat_exempt", label: "VAT Exempt" },
+  { value: "zero_rated", label: "Zero-Rated" },
+  { value: "no_tax", label: "No Tax" },
+] as const;
+
+/**
+ * One billing inclusion: whether it is charged, how much, and how it is taxed.
+ *
+ * The VAT mode only appears on a VATable item, because it only means anything
+ * there -- an exempt charge is neither inclusive nor exclusive of a VAT it
+ * never bore. Hiding it also keeps the row from asking a question with no
+ * right answer.
+ */
+function InclusionRow({
+  name,
+  label,
+  checked,
+  amount,
+  treatment,
+  mode,
+  freeLabel = false,
+  labelValue = "",
+}: {
+  name: string;
+  label: string;
+  checked: boolean;
+  amount: string;
+  treatment: string;
+  mode: string;
+  freeLabel?: boolean;
+  labelValue?: string;
+}) {
+  const [taxTreatment, setTaxTreatment] = useState(treatment);
+  const isVatable = taxTreatment === "vatable";
+
+  return (
+    <div
+      className="grid gap-2"
+      style={{ gridTemplateColumns: "minmax(9rem, 1fr) 8rem 9rem 9rem" }}
+    >
+      <label className="flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          name={`inclusion_${name}`}
+          defaultChecked={checked}
+          className="h-4 w-4 accent-[var(--color-brand-600)]"
+        />
+        {freeLabel ? (
+          <input
+            name={`inclusion_${name}_label`}
+            className="input"
+            placeholder="Other inclusion"
+            defaultValue={labelValue}
+          />
+        ) : (
+          label
+        )}
+      </label>
+
+      <input
+        name={`inclusion_${name}_amount`}
+        type="number"
+        step="0.01"
+        min="0"
+        className="input"
+        placeholder="Amount"
+        defaultValue={amount}
+      />
+
+      <select
+        name={`inclusion_${name}_treatment`}
+        className="select"
+        value={taxTreatment}
+        onChange={(event) => setTaxTreatment(event.currentTarget.value)}
+      >
+        {TAX_TREATMENTS.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+
+      {isVatable ? (
+        <select
+          name={`inclusion_${name}_mode`}
+          className="select"
+          defaultValue={mode}
+        >
+          <option value="exclusive">VAT Exclusive</option>
+          <option value="inclusive">VAT Inclusive</option>
+        </select>
+      ) : (
+        <p className="text-xs muted self-center">No VAT</p>
+      )}
     </div>
   );
 }
@@ -526,50 +634,34 @@ export function ContractForm({
             Only ticked items appear on this tenant&apos;s invoice.
           </span>
         </div>
-        <div className="card-body grid gap-3 sm:grid-cols-2">
+        {/* One row per item, full width: each carries four controls of its own
+            and two of them side by side collide. */}
+        <div className="card-body grid gap-3">
           {INCLUSIONS.map((item) => {
             const existing = inclusionDefaults.get(item.value);
             return (
-              <div key={item.value} className="flex items-center gap-3">
-                <label className="flex items-center gap-2 text-sm flex-1">
-                  <input
-                    type="checkbox"
-                    name={`inclusion_${item.value}`}
-                    defaultChecked={Boolean(existing)}
-                    className="h-4 w-4 accent-[var(--color-brand-600)]"
-                  />
-                  {item.label}
-                </label>
-                <input
-                  name={`inclusion_${item.value}_amount`}
-                  type="number"
-                  step="0.01"
-                  min="0"
-                  className="input"
-                  style={{ maxWidth: "9rem" }}
-                  placeholder="Amount"
-                  defaultValue={existing?.amount ?? ""}
-                />
-              </div>
+              <InclusionRow
+                key={item.value}
+                name={item.value}
+                label={item.label}
+                checked={Boolean(existing)}
+                amount={existing?.amount ?? ""}
+                treatment={existing?.tax_treatment ?? "vatable"}
+                mode={existing?.vat_mode ?? "exclusive"}
+              />
             );
           })}
 
-          <div className="flex items-center gap-3 sm:col-span-2">
-            <input
-              name="inclusion_other_label"
-              className="input flex-1"
-              placeholder="Other inclusion (leave blank if none)"
-              defaultValue={inclusionDefaults.get("other")?.label ?? ""}
-            />
-            <input
-              name="inclusion_other_amount"
-              type="number"
-              step="0.01"
-              min="0"
-              className="input"
-              style={{ maxWidth: "9rem" }}
-              placeholder="Amount"
-              defaultValue={inclusionDefaults.get("other")?.amount ?? ""}
+          <div>
+            <InclusionRow
+              name="other"
+              label="Other"
+              freeLabel
+              checked={Boolean(inclusionDefaults.get("other"))}
+              labelValue={inclusionDefaults.get("other")?.label ?? ""}
+              amount={inclusionDefaults.get("other")?.amount ?? ""}
+              treatment={inclusionDefaults.get("other")?.tax_treatment ?? "vatable"}
+              mode={inclusionDefaults.get("other")?.vat_mode ?? "exclusive"}
             />
           </div>
         </div>

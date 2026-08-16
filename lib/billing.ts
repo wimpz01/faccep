@@ -19,6 +19,29 @@ export function derivedRate(providerAmount: number, providerConsumption: number)
   return providerAmount / providerConsumption;
 }
 
+/**
+ * The rate a period actually charges.
+ *
+ * The derived rate recovers exactly what the provider billed and no more, so
+ * every kilowatt the sub-meters missed -- corridors, pumps, line loss -- is
+ * absorbed by the company. A period may set its own rate above that to recover
+ * it. Where none is set, the derived rate stands.
+ */
+export function effectiveRate({
+  providerAmount,
+  providerConsumption,
+  manualRate,
+}: {
+  providerAmount: number;
+  providerConsumption: number;
+  manualRate?: number | null;
+}) {
+  if (manualRate !== null && manualRate !== undefined && manualRate >= 0) {
+    return manualRate;
+  }
+  return derivedRate(providerAmount, providerConsumption);
+}
+
 export type UtilityChargeInput = {
   consumption: number;
   rate: number;
@@ -32,6 +55,71 @@ export type UtilityCharge = {
   /** How the figure was arrived at, shown on the invoice line. */
   basis: string;
 };
+
+export type TaxTreatment =
+  | "vatable"
+  | "non_vat"
+  | "vat_exempt"
+  | "zero_rated"
+  | "no_tax";
+
+export type VatMode = "inclusive" | "exclusive";
+
+export type TaxedAmount = {
+  /** The charge before VAT. */
+  net: number;
+  vat: number;
+  /** net + vat, to the centavo. */
+  total: number;
+  /** The rate actually applied, stamped onto the line. */
+  rate: number;
+};
+
+/**
+ * Splits one charge into net and VAT, on that charge's own terms.
+ *
+ * Inclusive means the amount handed in is already the total: the VAT is taken
+ * out of it, and the total comes back unchanged. Exclusive means the amount is
+ * net and the VAT goes on top. Adding VAT to an inclusive figure is the mistake
+ * this exists to make impossible.
+ *
+ * The VAT on an inclusive amount is derived by subtraction rather than by
+ * multiplying the net, so net + vat is exactly the amount entered however the
+ * division rounded. 1,500 at 12% gives 1,339.29 + 160.71, which is 1,500 and
+ * not 1,499.99.
+ *
+ * A tenant who is not VAT-registered cannot pass on output VAT, so their
+ * charges come back untaxed whatever the item says.
+ */
+export function taxedAmount({
+  amount,
+  treatment,
+  mode,
+  vatRate,
+  tenantIsVatable,
+}: {
+  amount: number;
+  treatment: TaxTreatment;
+  mode?: VatMode | null;
+  vatRate: number;
+  tenantIsVatable: boolean;
+}): TaxedAmount {
+  const gross = round2(amount);
+
+  // Everything but 'vatable' carries no VAT. They stay apart on the record
+  // because BIR reports exempt, zero-rated and VATable sales separately.
+  if (!tenantIsVatable || treatment !== "vatable" || vatRate <= 0) {
+    return { net: gross, vat: 0, total: gross, rate: 0 };
+  }
+
+  if (mode === "inclusive") {
+    const net = round2(gross / (1 + vatRate / 100));
+    return { net, vat: round2(gross - net), total: gross, rate: vatRate };
+  }
+
+  const vat = round2(gross * (vatRate / 100));
+  return { net: gross, vat, total: round2(gross + vat), rate: vatRate };
+}
 
 /** One tenant's charge for one utility, per their contract's billing type. */
 export function utilityCharge({
@@ -71,16 +159,20 @@ export function utilityCharge({
 }
 
 /**
- * Generator expense allocated pro-rata by the tenant's share of building kWh
- * (spec 6, confirmed decision).
+ * A building cost allocated pro-rata by the tenant's share of what was
+ * consumed (spec 6, confirmed decision).
+ *
+ * Generator fuel and servicing on an electricity period, split by kWh; pumping,
+ * tanks and treatment on a water one, split by cubic metres. The arithmetic is
+ * the same either way -- what differs is only the unit being shared out.
  */
-export function gensetShare(
+export function expenseShare(
   tenantConsumption: number,
   buildingConsumption: number,
-  gensetExpense: number,
+  expense: number,
 ) {
-  if (!buildingConsumption || buildingConsumption <= 0 || !gensetExpense) return 0;
-  return round2((tenantConsumption / buildingConsumption) * gensetExpense);
+  if (!buildingConsumption || buildingConsumption <= 0 || !expense) return 0;
+  return round2((tenantConsumption / buildingConsumption) * expense);
 }
 
 /**

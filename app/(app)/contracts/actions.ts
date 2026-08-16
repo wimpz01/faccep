@@ -159,6 +159,8 @@ function readSelections(formData: FormData) {
     label: string | null;
     amount: number | null;
     sort_order: number;
+    tax_treatment: string;
+    vat_mode: string | null;
   }[] = [];
 
   const standard = [
@@ -169,6 +171,24 @@ function readSelections(formData: FormData) {
     "electricity",
   ] as const;
 
+  /*
+   * How this item is taxed. A mode is stored only on a VATable item -- the
+   * database refuses the pair otherwise, because "exempt, inclusive" says two
+   * things at once and neither can be relied on.
+   */
+  const taxOf = (key: string) => {
+    const treatment = String(
+      formData.get(`inclusion_${key}_treatment`) ?? "vatable",
+    );
+    return {
+      tax_treatment: treatment,
+      vat_mode:
+        treatment === "vatable"
+          ? String(formData.get(`inclusion_${key}_mode`) ?? "exclusive")
+          : null,
+    };
+  };
+
   standard.forEach((key, index) => {
     if (formData.get(`inclusion_${key}`) !== "on") return;
     const raw = String(formData.get(`inclusion_${key}_amount`) ?? "").trim();
@@ -177,6 +197,7 @@ function readSelections(formData: FormData) {
       label: null,
       amount: raw === "" ? null : Number(raw),
       sort_order: index,
+      ...taxOf(key),
     });
   });
 
@@ -188,6 +209,7 @@ function readSelections(formData: FormData) {
       label: otherLabel,
       amount: raw === "" ? null : Number(raw),
       sort_order: standard.length,
+      ...taxOf("other"),
     });
   }
 
@@ -526,7 +548,8 @@ export async function deleteContract(formData: FormData) {
 const fundSchema = z.object({
   contract_id: z.string().uuid("Contract not found."),
   fund_kind: z.enum(["security_deposit", "advance_payment"]),
-  event: z.enum(["applied", "refunded", "forfeited"]),
+  // Only applied now: refunds and forfeitures go through a settlement.
+  event: z.enum(["applied"]),
   amount: z.coerce.number().positive("Enter an amount above zero."),
   applied_on: z.string().min(10, "Choose the date."),
   note: z.string().trim().nullish().or(z.literal("")),
