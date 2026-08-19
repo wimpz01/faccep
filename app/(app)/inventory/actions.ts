@@ -865,3 +865,134 @@ export async function updateItem(
   revalidatePath(`/inventory/${id}`);
   return { success: "Saved." };
 }
+
+/**
+ * Corrects a category's name.
+ *
+ * A category is a label, not a record with a history, so a misspelling is
+ * fixed in place rather than by making a second one and moving items across.
+ * Every item already pointing at it keeps pointing at it -- the name changes,
+ * the grouping does not.
+ */
+export async function renameCategory(
+  _prevState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  let companyId: string;
+  try {
+    const context = await assertPermission(MODULE.inventoryItems, "edit");
+    companyId = context.activeCompany!.companyId;
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+
+  const id = String(formData.get("id") ?? "");
+  const name = String(formData.get("name") ?? "").trim();
+  if (!id) return { error: "Missing category." };
+  if (!name) return { error: "Category name is required." };
+
+  const supabase = await createClient();
+  const { data: changed, error } = await supabase
+    .from("inventory_categories")
+    .update({ name })
+    .eq("id", id)
+    .eq("company_id", companyId)
+    .select("id");
+
+  if (error) {
+    return {
+      error:
+        error.code === "23505"
+          ? "Another category already has that name."
+          : error.message,
+    };
+  }
+  // An update that matched nothing is a silent no-op otherwise.
+  if (!changed || changed.length === 0) {
+    return { error: "That category is not in this company, or no longer exists." };
+  }
+
+  await logAudit({
+    action: "update",
+    moduleKey: MODULE.inventoryItems,
+    entityTable: "inventory_categories",
+    entityId: id,
+    summary: `Renamed a category to "${name}".`,
+    after: { name },
+  });
+
+  revalidatePath("/inventory/categories");
+  revalidatePath("/inventory");
+  return { success: `Renamed to "${name}".` };
+}
+
+/**
+ * Corrects a non-stock item's details.
+ *
+ * Everything about the item in one save: the name, what it is, the unit, the
+ * usual cost and the expense account it is charged to. None of it could be
+ * corrected once the item was created, so a misspelling was permanent.
+ *
+ * Changing the account changes where future purchases land. Bills already
+ * raised keep the account they were charged to -- the ledger is not rewritten
+ * behind them.
+ *
+ * The code is not editable. It is how the item is referred to on orders and
+ * bills already raised, and renaming a reference is how those stop matching.
+ */
+export async function updateNonStockItem(
+  _prevState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  let companyId: string;
+  try {
+    const context = await assertPermission(MODULE.inventoryItems, "edit");
+    companyId = context.activeCompany!.companyId;
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+
+  const id = String(formData.get("id") ?? "");
+  if (!id) return { error: "Missing item." };
+
+  const parsed = nonStockSchema.safeParse({
+    name: formData.get("name"),
+    description: formData.get("description"),
+    unit_of_measure: formData.get("unit_of_measure") || "lot",
+    default_cost: formData.get("default_cost") || 0,
+    expense_account_id: formData.get("expense_account_id"),
+  });
+  if (!parsed.success) return { error: parsed.error.issues[0].message };
+
+  const supabase = await createClient();
+  const { data: changed, error } = await supabase
+    .from("non_stock_items")
+    .update({ ...parsed.data, description: parsed.data.description || null })
+    .eq("id", id)
+    .eq("company_id", companyId)
+    .select("id, code");
+
+  if (error) {
+    return {
+      error:
+        error.code === "23505"
+          ? "Another non-stock item already has that name."
+          : error.message,
+    };
+  }
+  if (!changed || changed.length === 0) {
+    return { error: "That item is not in this company, or no longer exists." };
+  }
+
+  await logAudit({
+    action: "update",
+    moduleKey: MODULE.inventoryItems,
+    entityTable: "non_stock_items",
+    entityId: id,
+    summary: `Updated non-stock item ${changed[0].code}.`,
+    after: parsed.data,
+  });
+
+  revalidatePath("/inventory/non-stock");
+  return { success: `${changed[0].code} updated.` };
+}

@@ -6,8 +6,8 @@ import { requirePermission } from "@/lib/auth";
 import { MODULE, can } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
 
-import { createCategory } from "../actions";
-import { CategoryForm } from "../inventory-forms";
+import { createCategory, renameCategory } from "../actions";
+import { CategoryForm, CategoryRename } from "../inventory-forms";
 
 export const metadata: Metadata = { title: "Categories" };
 
@@ -60,6 +60,7 @@ export default async function CategoriesPage() {
                 <tr>
                   <th>Category</th>
                   <th className="text-right">Items</th>
+                  {canEdit ? <th /> : null}
                 </tr>
               </thead>
               <tbody>
@@ -69,6 +70,11 @@ export default async function CategoriesPage() {
                     <td className="text-right tabular-nums">
                       {(category.inventory_items ?? []).length}
                     </td>
+                    {canEdit ? (
+                      <td className="text-right">
+                        <CategoryRename action={renameCategory} category={category} />
+                      </td>
+                    ) : null}
                   </tr>
                 ))}
               </tbody>

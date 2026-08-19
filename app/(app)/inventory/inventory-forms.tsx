@@ -322,3 +322,57 @@ export function BorrowForm({
     </form>
   );
 }
+
+/**
+ * Renames one category in place.
+ *
+ * Kept shut until asked for, so the list stays a list. A misspelling is rare
+ * enough that a row of edit boxes would cost every reader something to spare
+ * the occasional typist a click.
+ */
+export function CategoryRename({
+  action,
+  category,
+}: {
+  action: (state: ActionState, formData: FormData) => Promise<ActionState>;
+  category: { id: string; name: string };
+}) {
+  const [state, formAction] = useActionState<ActionState, FormData>(action, {});
+  const [open, setOpen] = useState(false);
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        className="btn btn-secondary btn-sm"
+        onClick={() => setOpen(true)}
+      >
+        Rename
+      </button>
+    );
+  }
+
+  return (
+    <form action={formAction} className="flex items-center gap-2 flex-wrap justify-end">
+      <input type="hidden" name="id" value={category.id} />
+      <input
+        name="name"
+        className="input"
+        required
+        autoFocus
+        defaultValue={category.name}
+        aria-label={`New name for ${category.name}`}
+        style={{ maxWidth: "16rem" }}
+      />
+      <Submit label="Save" />
+      <button
+        type="button"
+        className="btn btn-secondary btn-sm"
+        onClick={() => setOpen(false)}
+      >
+        Cancel
+      </button>
+      <Result state={state} />
+    </form>
+  );
+}

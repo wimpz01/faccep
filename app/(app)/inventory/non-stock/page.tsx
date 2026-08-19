@@ -7,9 +7,12 @@ import { money } from "@/lib/format";
 import { MODULE, can } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
 
-import { createNonStockItem, updateNonStockAccount } from "../actions";
 import {
-  AccountPicker,
+  createNonStockItem,
+  updateNonStockItem,
+} from "../actions";
+import {
+  NonStockEditor,
   NonStockItemForm,
   type AccountOption,
 } from "./non-stock-forms";
@@ -119,7 +122,17 @@ export default async function NonStockItemsPage() {
               <tbody>
                 {rows.map((row) => (
                   <tr key={row.id}>
-                    <td className="text-xs tabular-nums muted">{row.code}</td>
+                    <td>
+                      {canEdit ? (
+                        <NonStockEditor
+                          action={updateNonStockItem}
+                          item={row}
+                          accounts={accountOptions}
+                        />
+                      ) : (
+                        <span className="text-xs tabular-nums muted">{row.code}</span>
+                      )}
+                    </td>
                     <td className="text-sm">
                       {row.name}
                       {row.description ? (
@@ -130,23 +143,12 @@ export default async function NonStockItemsPage() {
                     <td className="text-right tabular-nums text-sm">
                       {money(row.default_cost)}
                     </td>
-                    <td>
-                      {canEdit ? (
-                        <AccountPicker
-                          action={updateNonStockAccount}
-                          idField="item_id"
-                          idValue={row.id}
-                          fieldName="expense_account_id"
-                          accounts={accountOptions}
-                          current={row.expense_account_id}
-                        />
-                      ) : (
-                        <span className="text-sm">
-                          {row.chart_of_accounts
-                            ? `${row.chart_of_accounts.code} — ${row.chart_of_accounts.name}`
-                            : "—"}
-                        </span>
-                      )}
+                    {/* Read-only here: changing it is done in the pop-out,
+                        so the list stays a list. */}
+                    <td className="text-sm">
+                      {row.chart_of_accounts
+                        ? `${row.chart_of_accounts.code} — ${row.chart_of_accounts.name}`
+                        : "—"}
                     </td>
                   </tr>
                 ))}
