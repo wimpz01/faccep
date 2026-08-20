@@ -21,6 +21,20 @@ import { SortableDashboard } from "./sortable-dashboard";
 
 export const metadata: Metadata = { title: "Dashboard" };
 
+/** What each tenant document kind is called on screen. */
+const DOC_KIND_LABELS: Record<string, string> = {
+  mayors_permit: "Mayor's / Business permit",
+  business_permit: "Business permit",
+  dti_registration: "DTI",
+  bir_registration: "BIR",
+  sec_registration: "SEC",
+  valid_id: "ID",
+  contract: "Contract",
+  letter: "Letter",
+  memo: "Memo",
+  other: "Other",
+};
+
 /** What the grip says it is moving, for anyone reading by keyboard. */
 const LAYOUT_LABELS: Record<string, string> = {
   "my-calendar": "Coming up",
@@ -56,6 +70,16 @@ const ESCALATION_NOTICE_DAYS = 60;
  * itself, which is a click away and shows six.
  */
 const REMINDER_HORIZON_DAYS = 30;
+/**
+ * How far ahead a tenant's papers are flagged.
+ *
+ * Thirty days is enough to renew a mayor's permit without closing; seven is
+ * the point at which it stops being a reminder and becomes a problem. Kept as
+ * constants so a settings screen can take them over later without the rule
+ * itself having to move.
+ */
+const DOC_EXPIRY_NOTICE_DAYS = 30;
+const DOC_EXPIRY_URGENT_DAYS = 7;
 
 export default async function DashboardPage({
   searchParams,
@@ -89,6 +113,9 @@ export default async function DashboardPage({
   )
     .toISOString()
     .slice(0, 10);
+  const docHorizon = new Date(Date.now() + DOC_EXPIRY_NOTICE_DAYS * 86_400_000)
+    .toISOString()
+    .slice(0, 10);
   const monthStart = `${today.slice(0, 7)}-01`;
   // A year of utility history, so the chart shows a full seasonal cycle.
   const twelveMonthsAgo = new Date(
@@ -117,6 +144,7 @@ export default async function DashboardPage({
     { data: risesDue },
     { data: myReminders },
     { data: dueSchedules },
+    { data: expiringDocs },
   ] = await Promise.all([
     seeOccupancy
       ? supabase
@@ -314,6 +342,31 @@ export default async function DashboardPage({
             }[]
           >()
       : Promise.resolve({ data: null }),
+    /*
+     * Tenant papers coming up for renewal. Behind the tenants module, so a
+     * reader who may not see the tenant is not told about their permit.
+     */
+    can(permissions, MODULE.tenants, "view")
+      ? supabase
+          .from("documents")
+          .select("id, title, doc_kind, expires_on, tenant_id, tenants(company_name)")
+          .eq("company_id", companyId)
+          .eq("no_expiry", false)
+          .not("expires_on", "is", null)
+          .not("tenant_id", "is", null)
+          .lte("expires_on", docHorizon)
+          .order("expires_on")
+          .returns<
+            {
+              id: string;
+              title: string;
+              doc_kind: string;
+              expires_on: string;
+              tenant_id: string;
+              tenants: { company_name: string } | null;
+            }[]
+          >()
+      : Promise.resolve({ data: null }),
   ]);
 
   /*
@@ -482,7 +535,20 @@ export default async function DashboardPage({
     renewals.length +
     escalationsDue.length +
     (cheques?.length ?? 0);
-  const panelCount = notificationCount + overdue.length;
+  /*
+   * Papers already lapsed, or about to. Sorted soonest first, which puts the
+   * expired ones at the top where they belong.
+   */
+  const docAlerts = (expiringDocs ?? []).map((doc) => {
+    const days = Math.ceil(
+      (new Date(`${doc.expires_on}T00:00:00`).getTime() -
+        new Date(`${today}T00:00:00`).getTime()) /
+        86_400_000,
+    );
+    return { ...doc, days };
+  });
+
+  const panelCount = notificationCount + overdue.length + docAlerts.length;
 
   /*
    * What is sitting in the queue waiting on this reader.
@@ -756,6 +822,41 @@ export default async function DashboardPage({
               <div className="table-scroll">
                 <table className="table">
                   <tbody>
+                    {docAlerts.map((doc) => (
+                      <tr key={`doc-${doc.id}`}>
+                        <td style={{ width: "9rem" }}>
+                          <span
+                            className="badge"
+                            style={
+                              doc.days < 0
+                                ? { background: "var(--danger)", color: "#fff" }
+                                : { color: "var(--danger)" }
+                            }
+                          >
+                            {doc.days < 0 ? "expired" : "expiring"}
+                          </span>
+                        </td>
+                        <td>
+                          <Link
+                            href={`/tenants/${doc.tenant_id}`}
+                            style={{ color: "var(--color-brand-600)" }}
+                          >
+                            {doc.tenants?.company_name ?? "Unknown tenant"}
+                          </Link>{" "}
+                          — {DOC_KIND_LABELS[doc.doc_kind] ?? doc.doc_kind}
+                          <p className="text-xs muted">
+                            {doc.days < 0
+                              ? `Expired ${formatDate(doc.expires_on)}`
+                              : doc.days === 0
+                                ? `Expires today, ${formatDate(doc.expires_on)}`
+                                : `Expires in ${doc.days} day${doc.days === 1 ? "" : "s"} — ${formatDate(doc.expires_on)}`}
+                            {doc.days >= 0 && doc.days <= DOC_EXPIRY_URGENT_DAYS
+                              ? " · renew now"
+                              : ""}
+                          </p>
+                        </td>
+                      </tr>
+                    ))}
                     {overdue.map((invoice) => (
                       <tr key={`overdue-${invoice.id}`}>
                         <td style={{ width: "9rem" }}>

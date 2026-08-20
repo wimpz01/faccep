@@ -8,6 +8,9 @@ import { formatDate, money } from "@/lib/format";
 import { MODULE, can } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
 
+import { cancelReceipt, updateOrderLines } from "../../actions";
+import { CancelReceiptForm } from "../../cancel-receipt-form";
+import { OrderLineForm } from "../../order-line-form";
 import { createBillFromOrder } from "@/app/(app)/payables/actions";
 import { BillFromOrderForm } from "@/app/(app)/payables/payables-forms";
 import { round2 } from "@/lib/billing";
@@ -52,6 +55,8 @@ type OrderDetail = {
   goods_receipts: {
     id: string;
     receipt_no: string;
+    cancelled_at: string | null;
+    cancellation_reason: string | null;
     received_date: string;
     notes: string | null;
   }[];
@@ -76,7 +81,7 @@ export default async function PurchaseOrderDetailPage({
     .select(
       `*, vendors(name, payment_terms(name, days)), purchase_requests(request_no), locations(code, name),
        purchase_order_lines(id, description, quantity, unit_price, amount, quantity_received),
-       goods_receipts(id, receipt_no, received_date, notes)`,
+       goods_receipts(id, receipt_no, received_date, notes, cancelled_at, cancellation_reason)`,
     )
     .eq("id", id)
     .maybeSingle<OrderDetail>();
@@ -91,6 +96,20 @@ export default async function PurchaseOrderDetailPage({
   const fullyReceived = lines.every(
     (line) => Number(line.quantity_received) >= Number(line.quantity),
   );
+
+  /*
+   * Prices can be corrected until goods arrive. An order often has to go out
+   * before the supplier will quote, so a line raised at nought is priced when
+   * the invoice comes -- but once anything is received the value has been
+   * reported and other records lean on it, so it stops there.
+   */
+  const canReprice =
+    can(context.permissions, MODULE.purchasingOrders, "edit") &&
+    order.status !== "cancelled" &&
+    (order.purchase_order_lines ?? []).every(
+      (line) => Number(line.quantity_received) === 0,
+    );
+
 
   // Three-way match: what was received, what has been billed, what is left.
   const { data: bills } = await supabase
@@ -201,7 +220,24 @@ export default async function PurchaseOrderDetailPage({
       </div>
 
       <div className="mb-6">
-        <Card title="Lines" bodyClassName="">
+        <Card
+          title="Lines"
+          bodyClassName=""
+          action={
+            canReprice ? (
+              <OrderLineForm
+                action={updateOrderLines}
+                orderId={order.id}
+                lines={(order.purchase_order_lines ?? []).map((line) => ({
+                  id: line.id,
+                  description: line.description,
+                  quantity: line.quantity,
+                  unit_price: line.unit_price,
+                }))}
+              />
+            ) : null
+          }
+        >
           <div className="table-scroll">
             <table className="table">
               <thead>
@@ -429,6 +465,7 @@ export default async function PurchaseOrderDetailPage({
                   <th>Date</th>
                   <th>Notes</th>
                   <th className="text-right">Bill it</th>
+                  {canReceive ? <th /> : null}
                 </tr>
               </thead>
               <tbody>
@@ -438,7 +475,9 @@ export default async function PurchaseOrderDetailPage({
                     <td className="text-xs">{formatDate(receipt.received_date)}</td>
                     <td className="text-xs">{receipt.notes ?? "—"}</td>
                     <td className="text-right">
-                      {canBill ? (
+                      {receipt.cancelled_at ? (
+                        <span className="badge">cancelled</span>
+                      ) : canBill ? (
                         <Link
                           href={`/payables?receipt=${receipt.id}`}
                           className="btn btn-secondary btn-sm"
@@ -449,6 +488,21 @@ export default async function PurchaseOrderDetailPage({
                         <span className="text-xs muted">—</span>
                       )}
                     </td>
+                    {canReceive ? (
+                      <td className="text-right">
+                        {receipt.cancelled_at ? (
+                          <span className="text-xs muted">
+                            {receipt.cancellation_reason}
+                          </span>
+                        ) : (
+                          <CancelReceiptForm
+                            action={cancelReceipt}
+                            receiptId={receipt.id}
+                            receiptNo={receipt.receipt_no}
+                          />
+                        )}
+                      </td>
+                    ) : null}
                   </tr>
                 ))}
               </tbody>

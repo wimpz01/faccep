@@ -2150,6 +2150,128 @@ async function main() {
     [4, 400],
   );
 
+  /*
+   * A receipt is measured in the order's price, so the price has to exist
+   * first -- receiving at nought puts real goods into stock at no cost and
+   * leaves the order worth nothing, which the billing guard then reads as a
+   * delivery that never happened.
+   */
+  const unpriced = await orderAt("issued", "NOPRICE");
+  const unpricedLine = (
+    await db.query(`
+      insert into public.purchase_order_lines
+        (po_id, item_id, description, quantity, unit_price)
+      values (${lit(unpriced)}, ${lit(itemId)}, 'Unpriced cable', 5, 0)
+      returning id;
+    `)
+  )[0].id;
+  const unpricedReceipt = (
+    await db.query(`
+      insert into public.goods_receipts (company_id, po_id, receipt_no, received_date)
+      values (${lit(alpha)}, ${lit(unpriced)}, ${lit(`${TEST_TAG}-GR-NOPRICE`)}, '2026-05-05')
+      returning id;
+    `)
+  )[0].id;
+  check(
+    "goods cannot be received against a line with no price",
+    await expectFail(`
+      insert into public.goods_receipt_lines (receipt_id, po_line_id, quantity)
+      values (${lit(unpricedReceipt)}, ${lit(unpricedLine)}, 1);
+    `),
+    "blocked",
+  );
+  check(
+    "and the amount follows the price the moment it is set",
+    Number(
+      (
+        await db.query(`
+          update public.purchase_order_lines set unit_price = 12.5
+           where id = ${lit(unpricedLine)}
+          returning amount;
+        `)
+      )[0].amount,
+    ),
+    62.5,
+  );
+
+  /*
+   * Taking a receipt back reverses what it did rather than erasing it: the
+   * quantity comes off the line, the stock goes back out, and the order
+   * returns to the state its outstanding quantities describe.
+   */
+  const undoOrder = await orderAt("issued", "UNDO");
+  const undoLine = (
+    await db.query(
+      `select id from public.purchase_order_lines where po_id = ${lit(undoOrder)} limit 1;`,
+    )
+  )[0].id;
+  const undoReceipt = (
+    await db.query(`
+      insert into public.goods_receipts (company_id, po_id, receipt_no, received_date)
+      values (${lit(alpha)}, ${lit(undoOrder)}, ${lit(`${TEST_TAG}-GR-UNDO`)}, '2026-05-06')
+      returning id;
+    `)
+  )[0].id;
+  await db.query(`
+    insert into public.goods_receipt_lines (receipt_id, po_line_id, quantity)
+    values (${lit(undoReceipt)}, ${lit(undoLine)}, 10);
+  `);
+  const stockAfterUndoReceipt = Number(
+    (
+      await db.query(
+        `select quantity_on_hand from public.inventory_items where id = ${lit(itemId)};`,
+      )
+    )[0].quantity_on_hand,
+  );
+
+  const undoAdmin = (
+    await db.query("select id from public.profiles where is_super_admin limit 1;")
+  )[0].id;
+  await asUserCommitted(
+    undoAdmin,
+    `select public.cancel_goods_receipt(${lit(undoReceipt)}, 'keyed against the wrong order');`,
+  );
+
+  check(
+    "cancelling a receipt takes the quantity back off the order",
+    Number(
+      (
+        await db.query(
+          `select quantity_received from public.purchase_order_lines where id = ${lit(undoLine)};`,
+        )
+      )[0].quantity_received,
+    ),
+    0,
+  );
+  check(
+    "and the stock it brought in goes back out",
+    stockAfterUndoReceipt -
+      Number(
+        (
+          await db.query(
+            `select quantity_on_hand from public.inventory_items where id = ${lit(itemId)};`,
+          )
+        )[0].quantity_on_hand,
+      ),
+    10,
+  );
+  check(
+    "and the order is open for receiving again",
+    (
+      await db.query(
+        `select status from public.purchase_orders where id = ${lit(undoOrder)};`,
+      )
+    )[0].status,
+    "issued",
+  );
+  check(
+    "a receipt cannot be cancelled twice",
+    await expectFail(
+      `select public.cancel_goods_receipt(${lit(undoReceipt)}, 'again');`,
+    ),
+    "blocked",
+  );
+
   check(
     "nothing can be received on a cancelled order",
     await expectFail(`

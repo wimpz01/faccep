@@ -832,3 +832,148 @@ export async function receiveGoods(
   revalidatePath("/inventory");
   return { success: `${receipt.receipt_no} recorded. Stock has been updated.` };
 }
+
+/**
+ * Corrects the quantities and prices on an order that has not been received.
+ *
+ * An order often has to go out before the supplier will say what something
+ * costs, so a line is raised at nought and priced when the invoice arrives.
+ * Until now nothing could put that right: lines were written when the order
+ * was created and never again, so a mispriced order stayed mispriced, and the
+ * billing guard -- which measures value, not goods -- read a nought-valued
+ * order as one where nothing had arrived.
+ *
+ * The cut-off is receipt, not issue. Once goods are in, the received value has
+ * been reported, stock has moved against it and a bill may already have been
+ * measured against it; changing the price underneath all that would restate
+ * figures other records have already relied on.
+ */
+export async function updateOrderLines(
+  _prevState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  try {
+    await assertPermission(MODULE.purchasingOrders, "edit");
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+
+  const orderId = String(formData.get("order_id") ?? "");
+  if (!orderId) return { error: "Missing order." };
+
+  const supabase = await createClient();
+  const { data: order } = await supabase
+    .from("purchase_orders")
+    .select("id, po_no, status, purchase_order_lines(id, quantity_received)")
+    .eq("id", orderId)
+    .maybeSingle<{
+      id: string;
+      po_no: string;
+      status: string;
+      purchase_order_lines: { id: string; quantity_received: string }[];
+    }>();
+
+  if (!order) return { error: "That order no longer exists." };
+  if (order.status === "cancelled") {
+    return { error: "This order has been cancelled, so its lines cannot be changed." };
+  }
+
+  const anyReceived = (order.purchase_order_lines ?? []).some(
+    (line) => Number(line.quantity_received) > 0,
+  );
+  if (anyReceived) {
+    return {
+      error:
+        "Goods have already been received on this order, so its prices can no longer be changed. Record the supplier's figure on the invoice instead.",
+    };
+  }
+
+  /*
+   * One update per line rather than an upsert: only the lines that actually
+   * moved are written, and a line belonging to another order cannot be reached
+   * because every update is bounded by this order's id.
+   */
+  let changed = 0;
+  for (const [field, raw] of formData.entries()) {
+    if (!field.startsWith("line_price:")) continue;
+    const lineId = field.slice("line_price:".length);
+    const price = Number(raw);
+    const quantity = Number(formData.get(`line_qty:${lineId}`) ?? 0);
+
+    if (!Number.isFinite(price) || price < 0) {
+      return { error: "A unit price cannot be negative." };
+    }
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      return { error: "A quantity must be above zero." };
+    }
+
+    const { error } = await supabase
+      .from("purchase_order_lines")
+      .update({ quantity, unit_price: price })
+      .eq("id", lineId)
+      .eq("po_id", orderId);
+    if (error) return { error: error.message };
+    changed += 1;
+  }
+
+  if (changed === 0) return { error: "Nothing to save." };
+
+  await logAudit({
+    action: "update",
+    moduleKey: MODULE.purchasingOrders,
+    entityTable: "purchase_orders",
+    entityId: orderId,
+    summary: `Repriced ${changed} line(s) on ${order.po_no}.`,
+  });
+
+  revalidatePath(`/purchasing/orders/${orderId}`);
+  revalidatePath("/purchasing/orders");
+  revalidatePath("/payables");
+  return { success: `Saved. ${changed} line(s) updated.` };
+}
+
+/**
+ * Takes a receipt back.
+ *
+ * The reversal itself lives in the database, because undoing a receipt means
+ * unwinding three things at once -- the quantity on the order, the stock it
+ * brought in, and the order's own status -- and a half-done reversal is worse
+ * than none. This carries the reason through and reports what came back.
+ */
+export async function cancelReceipt(
+  _prevState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  try {
+    await assertPermission(MODULE.purchasingReceiving, "edit");
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+
+  const receiptId = String(formData.get("receipt_id") ?? "");
+  const reason = String(formData.get("reason") ?? "").trim();
+  if (!receiptId) return { error: "Missing receipt." };
+  if (!reason) return { error: "Say why the receipt is being cancelled." };
+
+  const supabase = await createClient();
+  const { error } = await supabase.rpc("cancel_goods_receipt", {
+    p_receipt: receiptId,
+    p_reason: reason,
+  });
+  if (error) return { error: error.message };
+
+  await logAudit({
+    action: "update",
+    moduleKey: MODULE.purchasingReceiving,
+    entityTable: "goods_receipts",
+    entityId: receiptId,
+    summary: `Cancelled a goods receipt: ${reason}`,
+  });
+
+  revalidatePath("/purchasing/orders");
+  revalidatePath("/payables");
+  return {
+    success:
+      "Receipt cancelled. The quantity is back on the order and the stock has been taken out again.",
+  };
+}
