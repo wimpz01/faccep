@@ -5,6 +5,8 @@ import { useFormStatus } from "react-dom";
 
 import { FormError } from "@/components/ui";
 
+import { TenantDocuments } from "./tenant-documents";
+
 import type { ActionState } from "./actions";
 
 export type TenantValues = {
@@ -46,10 +48,13 @@ export function TenantForm({
   action,
   tenant,
   submitLabel,
+  companyId,
 }: {
   action: (state: ActionState, formData: FormData) => Promise<ActionState>;
   tenant?: TenantValues;
   submitLabel: string;
+  /** Only the create form attaches documents, so this is optional. */
+  companyId?: string;
 }) {
   const [state, formAction] = useActionState<ActionState, FormData>(action, {});
   const key = tenant?.id ?? "new";
@@ -158,6 +163,8 @@ export function TenantForm({
           defaultValue={tenant?.address ?? ""}
         />
       </div>
+
+      {companyId ? <TenantDocuments companyId={companyId} /> : null}
 
       <div className="sm:col-span-2">
         <label className="label" htmlFor={`notes-${key}`}>

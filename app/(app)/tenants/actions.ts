@@ -62,9 +62,11 @@ export async function createTenant(
   formData: FormData,
 ): Promise<ActionState> {
   let companyId: string;
+  let userId: string;
   try {
     const context = await assertPermission(MODULE.tenants, "edit");
     companyId = context.activeCompany!.companyId;
+    userId = context.userId;
   } catch (error) {
     return { error: (error as Error).message };
   }
@@ -88,12 +90,63 @@ export async function createTenant(
     };
   }
 
+  /*
+   * The papers attached while the form was being filled in. They are already
+   * in storage -- the browser put them there as they were chosen -- so this
+   * only writes the rows that tie them to the tenant that now exists.
+   *
+   * A failure here does not undo the tenant. The tenant is the record that
+   * matters and it is sound; a document that did not attach can be attached
+   * again, and saying so is better than throwing the tenant away.
+   */
+  const docs: {
+    company_id: string;
+    tenant_id: string;
+    title: string;
+    doc_kind: string;
+    storage_path: string;
+    expires_on: string | null;
+    no_expiry: boolean;
+    uploaded_by: string;
+  }[] = [];
+
+  for (const [field, raw] of formData.entries()) {
+    if (!field.startsWith("doc_path:")) continue;
+    const kind = field.slice("doc_path:".length);
+    const path = String(raw).trim();
+    if (!path) continue;
+
+    const noExpiry = formData.get(`doc_no_expiry:${kind}`) === "on";
+    const expiry = String(formData.get(`doc_expiry:${kind}`) ?? "").slice(0, 10);
+
+    docs.push({
+      company_id: companyId,
+      tenant_id: data.id,
+      title: String(formData.get(`doc_name:${kind}`) ?? kind),
+      doc_kind: kind,
+      storage_path: path,
+      // A date and "never expires" contradict each other; the database
+      // refuses the pair, so the flag wins here.
+      expires_on: noExpiry || !expiry ? null : expiry,
+      no_expiry: noExpiry,
+      uploaded_by: userId,
+    });
+  }
+
+  let docNote = "";
+  if (docs.length > 0) {
+    const { error: docError } = await supabase.from("documents").insert(docs);
+    docNote = docError
+      ? ` The tenant was created, but the documents did not attach: ${docError.message}`
+      : ` ${docs.length} document${docs.length === 1 ? "" : "s"} attached.`;
+  }
+
   await logAudit({
     action: "create",
     moduleKey: MODULE.tenants,
     entityTable: "tenants",
     entityId: data.id,
-    summary: `Created tenant "${data.company_name}".`,
+    summary: `Created tenant "${data.company_name}".${docNote}`,
     after: toRow(parsed.data),
   });
 

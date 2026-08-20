@@ -151,6 +151,40 @@ export default async function TenantDetailPage({
    * the figure here and the figure on the invoice cannot drift apart.
    */
   const today = new Date().toISOString().slice(0, 10);
+
+  /*
+   * The tenant's papers. Read here rather than joined into the tenant query so
+   * a tenant with none reads as a tenant with none, which is what the older
+   * records are.
+   */
+  const { data: documentRows } = await supabase
+    .from("documents")
+    .select("id, title, doc_kind, expires_on, no_expiry, created_at")
+    .eq("tenant_id", id)
+    .order("created_at", { ascending: false })
+    .returns<
+      {
+        id: string;
+        title: string;
+        doc_kind: string;
+        expires_on: string | null;
+        no_expiry: boolean;
+        created_at: string;
+      }[]
+    >();
+
+  /*
+   * The newest of each kind is the one that counts. A replaced permit is kept
+   * -- it is what the tenant was trading on last year -- but it is not what
+   * the expiry is watched against.
+   */
+  const docs = Object.values(
+    Object.fromEntries(
+      [...(documentRows ?? [])]
+        .reverse()
+        .map((row) => [row.doc_kind, row]),
+    ),
+  );
   const currentRent = current
     ? rentForPeriod(
         Number(current.monthly_rent),
@@ -605,6 +639,77 @@ export default async function TenantDetailPage({
 
       <div className="mb-6">
         <Card
+          title="Documents"
+          description="The tenant's permits and registrations, and when they lapse."
+          bodyClassName=""
+        >
+          {docs.length > 0 ? (
+            <div className="table-scroll">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Document</th>
+                    <th>File</th>
+                    <th>Expires</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {docs.map((doc) => {
+                    const days = doc.expires_on
+                      ? Math.ceil(
+                          (new Date(`${doc.expires_on}T00:00:00`).getTime() -
+                            new Date(`${today}T00:00:00`).getTime()) /
+                            86400000,
+                        )
+                      : null;
+                    return (
+                      <tr key={doc.id}>
+                        <td className="text-sm">
+                          {DOC_KIND_LABELS[doc.doc_kind] ?? doc.doc_kind}
+                        </td>
+                        <td className="text-xs muted">{doc.title}</td>
+                        <td className="text-xs">
+                          {doc.no_expiry
+                            ? "Never expires"
+                            : doc.expires_on
+                              ? formatDate(doc.expires_on)
+                              : "Not stated"}
+                        </td>
+                        <td>
+                          {doc.no_expiry || days === null ? (
+                            <span className="badge">—</span>
+                          ) : days < 0 ? (
+                            <span
+                              className="badge"
+                              style={{ background: "var(--danger)", color: "#fff" }}
+                            >
+                              expired
+                            </span>
+                          ) : days <= 30 ? (
+                            <span className="badge" style={{ color: "var(--danger)" }}>
+                              {days === 0 ? "expires today" : `${days} day(s) left`}
+                            </span>
+                          ) : (
+                            <span className="badge badge-brand">active</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <EmptyState>
+              No documents on file for this tenant.
+            </EmptyState>
+          )}
+        </Card>
+      </div>
+
+      <div className="mb-6">
+        <Card
           title="Company details"
           description="Who the tenant is. These print on the contract and the invoice."
         >
@@ -753,3 +858,17 @@ export default async function TenantDetailPage({
     </>
   );
 }
+
+/** What each document kind is called on screen. */
+const DOC_KIND_LABELS: Record<string, string> = {
+  mayors_permit: "Mayor's / Business permit",
+  business_permit: "Business permit",
+  dti_registration: "DTI",
+  bir_registration: "BIR",
+  sec_registration: "SEC",
+  valid_id: "ID",
+  contract: "Contract",
+  letter: "Letter",
+  memo: "Memo",
+  other: "Other",
+};

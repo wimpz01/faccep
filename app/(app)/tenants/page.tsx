@@ -85,7 +85,11 @@ export default async function TenantsPage({
             title="Add a tenant"
             description="You will land on the tenant profile, where you can raise their contract."
           >
-            <TenantForm action={createTenant} submitLabel="Create tenant" />
+            <TenantForm
+              action={createTenant}
+              submitLabel="Create tenant"
+              companyId={companyId}
+            />
           </Card>
         </div>
       ) : null}
