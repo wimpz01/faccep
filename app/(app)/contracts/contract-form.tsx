@@ -5,6 +5,8 @@ import { useActionState, useMemo, useState } from "react";
 import { useFormStatus } from "react-dom";
 
 import { FormError } from "@/components/ui";
+
+import { ChequeEntry } from "./cheque-entry";
 import { defaultEndDate, escalatedAmount, money } from "@/lib/format";
 
 import type { ActionState } from "./actions";
@@ -626,6 +628,8 @@ export function ContractForm({
           ) : null}
         </div>
       </section>
+
+      {!contract?.id ? <ChequeEntry defaultAmount={rent} /> : null}
 
       <section className="card">
         <div className="card-header">

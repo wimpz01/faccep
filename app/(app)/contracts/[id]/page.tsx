@@ -9,6 +9,8 @@ import { MODULE, can } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
 
 import {
+  addChequeReceipt,
+  removeChequeReceipt,
   activateContract,
   decideEscalation,
   deleteContract,
@@ -17,6 +19,7 @@ import {
   updateContract,
 } from "../actions";
 import { CONTRACT_STATUS_BADGE, FUND_STATUS } from "../constants";
+import { ChequeReceiptForm } from "../cheque-receipt-form";
 import { EscalationDecisionForm } from "../escalation-form";
 import { ContractForm } from "../contract-form";
 import { loadContractOptions } from "../data";
@@ -88,6 +91,29 @@ export default async function ContractDetailPage({
     .maybeSingle<ContractDetail>();
 
   if (!contract || contract.company_id !== companyId) notFound();
+
+  /*
+   * The cheques acknowledged on this contract. A plain note -- read on its own
+   * rather than joined in, so a contract with none reads as a contract with
+   * none, which is every contract signed before this existed.
+   */
+  const { data: chequeRows } = await supabase
+    .from("contract_cheque_receipts")
+    .select("id, bank, cheque_no, amount, cheque_date")
+    .eq("contract_id", id)
+    .order("cheque_date")
+    .returns<
+      {
+        id: string;
+        bank: string;
+        cheque_no: string;
+        amount: string;
+        cheque_date: string;
+      }[]
+    >();
+
+  const cheques = chequeRows ?? [];
+  const chequeTotal = cheques.reduce((sum, row) => sum + Number(row.amount), 0);
 
   /*
    * The rent for every year of the term, and what remains of the money taken
@@ -361,6 +387,102 @@ export default async function ContractDetailPage({
               </tbody>
             </table>
           </div>
+        </Card>
+      </div>
+
+      <div className="mb-6">
+        <Card
+          title="Postdated cheques received"
+          description="A note of what the tenant handed over at signing. Not the cashier's cheque register — nothing here is banked, chased or applied to a bill."
+          bodyClassName=""
+          action={
+            cheques.length > 0 ? (
+              <Link
+                href={`/contracts/${contract.id}/cheque-receipt`}
+                className="btn btn-secondary btn-sm"
+              >
+                Print receipt
+              </Link>
+            ) : null
+          }
+        >
+          {cheques.length > 0 ? (
+            <div className="table-scroll">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th style={{ width: "2.5rem" }} className="text-right">#</th>
+                    <th>Bank</th>
+                    <th>Cheque number</th>
+                    <th>Cheque date</th>
+                    <th className="text-right">Amount</th>
+                    {canEdit ? <th /> : null}
+                  </tr>
+                </thead>
+                <tbody>
+                  {cheques.map((cheque, index) => (
+                    <tr key={cheque.id}>
+                      <td className="text-right tabular-nums text-xs muted">
+                        {index + 1}
+                      </td>
+                      <td className="text-sm">{cheque.bank}</td>
+                      <td className="text-sm tabular-nums">{cheque.cheque_no}</td>
+                      <td className="text-xs">{formatDate(cheque.cheque_date)}</td>
+                      <td className="text-right tabular-nums">
+                        {money(cheque.amount)}
+                      </td>
+                      {canEdit ? (
+                        <td className="text-right">
+                          <form action={removeChequeReceipt}>
+                            <input type="hidden" name="id" value={cheque.id} />
+                            <input
+                              type="hidden"
+                              name="contract_id"
+                              value={contract.id}
+                            />
+                            <button
+                              type="submit"
+                              className="btn btn-secondary btn-sm"
+                              aria-label={`Remove cheque ${cheque.cheque_no}`}
+                            >
+                              ×
+                            </button>
+                          </form>
+                        </td>
+                      ) : null}
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot>
+                  <tr>
+                    <td colSpan={4} className="text-right font-semibold">
+                      {cheques.length} cheque{cheques.length === 1 ? "" : "s"}
+                    </td>
+                    <td className="text-right tabular-nums font-semibold">
+                      {money(chequeTotal)}
+                    </td>
+                    {canEdit ? <td /> : null}
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          ) : (
+            <div className="card-body">
+              <p className="text-sm muted">
+                No cheques recorded against this contract yet.
+              </p>
+            </div>
+          )}
+
+          {canEdit ? (
+            <div className="card-body">
+              <ChequeReceiptForm
+                action={addChequeReceipt}
+                contractId={contract.id}
+                defaultAmount={String(contract.monthly_rent ?? "")}
+              />
+            </div>
+          ) : null}
         </Card>
       </div>
 

@@ -250,9 +250,11 @@ export async function createContract(
   formData: FormData,
 ): Promise<ActionState> {
   let companyId: string;
+  let userId: string;
   try {
     const context = await assertPermission(MODULE.contracts, "edit");
     companyId = context.activeCompany!.companyId;
+    userId = context.userId;
   } catch (error) {
     return { error: (error as Error).message };
   }
@@ -283,12 +285,53 @@ export async function createContract(
   const selectionError = await replaceSelections(data.id, unitIds, inclusions);
   if (selectionError) return { error: selectionError };
 
+  /*
+   * The postdated cheques the tenant handed over, written now that there is a
+   * contract for them to belong to. The rows arrive in parallel arrays, one
+   * entry per field per row, which is what a table of repeated inputs posts.
+   *
+   * A failure here does not undo the contract: the contract is the record that
+   * matters and it is sound, and a cheque that did not record can be added on
+   * the contract's own page.
+   */
+  const banks = formData.getAll("cheque_bank").map((v) => String(v).trim());
+  const numbers = formData.getAll("cheque_no").map((v) => String(v).trim());
+  const amounts = formData.getAll("cheque_amount").map((v) => Number(v));
+  const dates = formData
+    .getAll("cheque_date")
+    .map((v) => String(v).slice(0, 10));
+
+  const cheques = banks
+    .map((bank, index) => ({
+      company_id: companyId,
+      contract_id: data.id,
+      bank,
+      cheque_no: numbers[index] ?? "",
+      amount: amounts[index] ?? 0,
+      cheque_date: dates[index] ?? "",
+      received_by: userId,
+    }))
+    .filter(
+      (row) =>
+        row.bank && row.cheque_no && row.cheque_date && row.amount > 0,
+    );
+
+  let chequeNote = "";
+  if (cheques.length > 0) {
+    const { error: chequeError } = await supabase
+      .from("contract_cheque_receipts")
+      .insert(cheques);
+    chequeNote = chequeError
+      ? ` The contract was created, but the cheques did not record: ${chequeError.message}`
+      : ` ${cheques.length} postdated cheque${cheques.length === 1 ? "" : "s"} recorded.`;
+  }
+
   await logAudit({
     action: "create",
     moduleKey: MODULE.contracts,
     entityTable: "contracts",
     entityId: data.id,
-    summary: `Created contract ${data.contract_no} (draft).`,
+    summary: `Created contract ${data.contract_no} (draft).${chequeNote}`,
     after: { ...toRow(parsed.data), units: unitIds.length },
   });
 
@@ -683,4 +726,87 @@ export async function decideEscalation(
   revalidatePath("/tenants");
   revalidatePath("/dashboard");
   return { success: decision === "waived" ? "Rise held." : "Rise applied." };
+}
+
+/**
+ * Records a postdated cheque handed over at signing.
+ *
+ * A note on the contract, nothing more: it settles no invoice, enters no
+ * cashier's queue and raises no maturity alert. If the cheque is later given
+ * to the cashier to bank, it is recorded there separately.
+ */
+export async function addChequeReceipt(
+  _prevState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  let companyId: string;
+  let userId: string;
+  try {
+    const context = await assertPermission(MODULE.contracts, "edit");
+    companyId = context.activeCompany!.companyId;
+    userId = context.userId;
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+
+  const contractId = String(formData.get("contract_id") ?? "");
+  const bank = String(formData.get("bank") ?? "").trim();
+  const chequeNo = String(formData.get("cheque_no") ?? "").trim();
+  const chequeDate = String(formData.get("cheque_date") ?? "").slice(0, 10);
+  const amount = Number(formData.get("amount") ?? 0);
+
+  if (!contractId) return { error: "Missing contract." };
+  if (!bank) return { error: "Which bank is the cheque drawn on?" };
+  if (!chequeNo) return { error: "Enter the cheque number." };
+  if (!chequeDate) return { error: "Enter the date written on the cheque." };
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return { error: "Enter an amount above zero." };
+  }
+
+  const supabase = await createClient();
+  const { error } = await supabase.from("contract_cheque_receipts").insert({
+    company_id: companyId,
+    contract_id: contractId,
+    bank,
+    cheque_no: chequeNo,
+    amount,
+    cheque_date: chequeDate,
+    notes: String(formData.get("notes") ?? "").trim() || null,
+    received_by: userId,
+  });
+
+  if (error) {
+    return {
+      error:
+        error.code === "23505"
+          ? "That cheque number from that bank is already recorded on this contract."
+          : error.message,
+    };
+  }
+
+  await logAudit({
+    action: "create",
+    moduleKey: MODULE.contracts,
+    entityTable: "contract_cheque_receipts",
+    entityId: contractId,
+    summary: `Acknowledged cheque ${chequeNo} (${bank}) for ${amount.toFixed(2)}.`,
+  });
+
+  revalidatePath(`/contracts/${contractId}`);
+  return { success: `Cheque ${chequeNo} recorded.` };
+}
+
+export async function removeChequeReceipt(formData: FormData) {
+  try {
+    await assertPermission(MODULE.contracts, "edit");
+  } catch {
+    return;
+  }
+
+  const id = String(formData.get("id") ?? "");
+  const contractId = String(formData.get("contract_id") ?? "");
+  const supabase = await createClient();
+  await supabase.from("contract_cheque_receipts").delete().eq("id", id);
+
+  revalidatePath(`/contracts/${contractId}`);
 }
