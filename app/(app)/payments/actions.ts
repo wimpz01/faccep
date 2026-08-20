@@ -617,3 +617,144 @@ export async function setPdcStatus(
   revalidatePath("/dashboard");
   return { success: `Cheque ${before.check_no} marked ${status}.` };
 }
+
+/**
+ * Sets an existing credit against a bill raised after it was taken.
+ *
+ * A prepayment could be recorded and never used. Applications were only ever
+ * written at the moment a payment was taken, or when a cheque cleared, so
+ * money paid ahead of an invoice sat as a credit with nothing able to reach
+ * it -- the tenant had paid and the invoice still read unpaid.
+ *
+ * The ledger side needs nothing new: inserting the application already posts
+ * Dr Customer Advances / Cr Accounts Receivable, which is exactly the entry
+ * that turns a credit into a settlement.
+ */
+export async function applyPrepayment(
+  _prevState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  try {
+    await assertPermission(MODULE.payments, "edit");
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+
+  const paymentId = String(formData.get("payment_id") ?? "");
+  if (!paymentId) return { error: "Missing payment." };
+
+  const supabase = await createClient();
+  const { data: payment } = await supabase
+    .from("payments")
+    .select("id, payment_no, payment_kind, amount, status, tenant_id")
+    .eq("id", paymentId)
+    .maybeSingle<{
+      id: string;
+      payment_no: string;
+      payment_kind: string;
+      amount: string;
+      status: string;
+      tenant_id: string;
+    }>();
+
+  if (!payment) return { error: "That payment no longer exists." };
+  if (payment.status === "voided") {
+    return { error: "This payment has been voided, so it cannot be applied." };
+  }
+  // A deposit is held against the contract and a refund is money out; the
+  // database refuses both, and saying so here is clearer than the raw error.
+  if (payment.payment_kind === "deposit" || payment.payment_kind === "refund") {
+    return {
+      error: `A ${payment.payment_kind} is not a credit on account, so it cannot be set against an invoice.`,
+    };
+  }
+
+  const { data: existing } = await supabase
+    .from("payment_applications")
+    .select("amount")
+    .eq("payment_id", paymentId);
+
+  const alreadyApplied = round2(
+    (existing ?? []).reduce((sum, row) => sum + Number(row.amount), 0),
+  );
+  const unapplied = round2(Number(payment.amount) - alreadyApplied);
+
+  const rows: { invoice_id: string; amount: number }[] = [];
+  for (const [field, raw] of formData.entries()) {
+    if (!field.startsWith("apply:")) continue;
+    const value = String(raw).trim();
+    if (value === "" || Number(value) <= 0) continue;
+    rows.push({
+      invoice_id: field.slice("apply:".length),
+      amount: round2(Number(value)),
+    });
+  }
+
+  if (rows.length === 0) {
+    return { error: "Tick an invoice and enter how much of the credit to set against it." };
+  }
+
+  const total = round2(rows.reduce((sum, row) => sum + row.amount, 0));
+  if (total > unapplied) {
+    return {
+      error: `Only ${unapplied.toFixed(2)} of this payment is unapplied, but ${total.toFixed(2)} has been entered.`,
+    };
+  }
+
+  const { error } = await supabase
+    .from("payment_applications")
+    .insert(rows.map((row) => ({ payment_id: paymentId, ...row })));
+  if (error) return { error: error.message };
+
+  await logAudit({
+    action: "update",
+    moduleKey: MODULE.payments,
+    entityTable: "payments",
+    entityId: paymentId,
+    summary: `Applied ${total.toFixed(2)} of ${payment.payment_no} to ${rows.length} invoice(s).`,
+    after: { applications: rows },
+  });
+
+  revalidatePath(`/payments/${paymentId}`);
+  revalidatePath("/payments");
+  revalidatePath("/billing/invoices");
+  return {
+    success: `Applied ${total.toFixed(2)} to ${rows.length} invoice${rows.length === 1 ? "" : "s"}.`,
+  };
+}
+
+/**
+ * Takes an application back off an invoice.
+ *
+ * Removing the row reverses its posting, which the ledger trigger does on
+ * delete, so the credit returns to the tenant's account and the invoice goes
+ * back to unpaid. The payment itself is untouched -- this undoes where the
+ * money was pointed, not the fact that it was received.
+ */
+export async function unapplyPayment(formData: FormData) {
+  try {
+    await assertPermission(MODULE.payments, "edit");
+  } catch {
+    return;
+  }
+
+  const id = String(formData.get("id") ?? "");
+  const paymentId = String(formData.get("payment_id") ?? "");
+  const supabase = await createClient();
+  const { error } = await supabase
+    .from("payment_applications")
+    .delete()
+    .eq("id", id);
+  if (error) return;
+
+  await logAudit({
+    action: "update",
+    moduleKey: MODULE.payments,
+    entityTable: "payments",
+    entityId: paymentId,
+    summary: "Took an application back off an invoice; the credit is unapplied again.",
+  });
+
+  revalidatePath(`/payments/${paymentId}`);
+  revalidatePath("/billing/invoices");
+}

@@ -228,7 +228,7 @@ export default async function PaymentsPage({
                 </Link>
               ) : (
                 <Link href="/payments?fund=1" className="btn btn-secondary btn-sm">
-                  Apply advance / deposit
+                  Draw on contract funds
                 </Link>
               )
             ) : null}
@@ -270,8 +270,8 @@ export default async function PaymentsPage({
       {applyingFund ? (
         <div className="mb-6">
           <Card
-            title="Apply an advance or deposit"
-            description="Money already held against a contract, set against a bill, refunded or forfeited. The contract keeps saying what was taken at signing."
+            title="Draw on a contract's deposit or advance"
+            description="The deposit or advance agreed on a contract, drawn down against a bill or a repair. Not the same as a prepayment on account — to place one of those, open the payment itself and apply it."
           >
             <FundApplicationForm
               action={applyContractFund}

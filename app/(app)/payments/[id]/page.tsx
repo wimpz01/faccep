@@ -9,7 +9,8 @@ import { formatDate, money } from "@/lib/format";
 import { MODULE, can } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
 
-import { requestPaymentVoid } from "../actions";
+import { applyPrepayment, requestPaymentVoid, unapplyPayment } from "../actions";
+import { ApplyCreditForm, type OpenBill } from "../apply-credit-form";
 import { VoidRequestForm } from "../payment-forms";
 
 export const metadata: Metadata = { title: "Payment" };
@@ -29,6 +30,7 @@ type PaymentDetail = {
   void_reason: string | null;
   tenants: { id: string; company_name: string } | null;
   payment_applications: {
+    id: string;
     amount: string;
     invoices: { id: string; invoice_no: string; due_date: string } | null;
   }[];
@@ -50,7 +52,7 @@ export default async function PaymentDetailPage({
   const { data: payment } = await supabase
     .from("payments")
     .select(
-      "*, tenants(id, company_name), payment_applications(amount, invoices(id, invoice_no, due_date))",
+      "*, tenants(id, company_name), payment_applications(id, amount, invoices(id, invoice_no, due_date))",
     )
     .eq("id", id)
     .maybeSingle<PaymentDetail>();
@@ -62,6 +64,56 @@ export default async function PaymentDetailPage({
     (sum, row) => sum + Number(row.amount),
     0,
   );
+
+  const unapplied = Math.round((Number(payment.amount) - applied) * 100) / 100;
+
+  // Taking an application back off a live payment; a voided one is already
+  // reversed and must not be touched again.
+  const canUnapply =
+    can(context.permissions, MODULE.payments, "edit") &&
+    payment.status !== "voided";
+
+  /*
+   * A credit can only be placed while it is unapplied, the payment stands, and
+   * it is money held on account. A deposit belongs to a contract and a refund
+   * is money out; neither settles a bill, and the database refuses both.
+   */
+  const canApply =
+    can(context.permissions, MODULE.payments, "edit") &&
+    payment.status !== "voided" &&
+    payment.payment_kind !== "deposit" &&
+    payment.payment_kind !== "refund" &&
+    unapplied > 0;
+
+  const { data: billRows } = canApply
+    ? await supabase
+        .from("invoices")
+        .select("id, invoice_no, due_date, total, amount_paid, credited_amount")
+        .eq("company_id", companyId)
+        .eq("tenant_id", payment.tenants?.id ?? "")
+        .in("status", ["released", "partially_paid"])
+        .order("due_date")
+        .returns<
+          {
+            id: string;
+            invoice_no: string;
+            due_date: string;
+            total: string;
+            amount_paid: string;
+            credited_amount: string;
+          }[]
+        >()
+    : { data: null };
+
+  const openBills: OpenBill[] = (billRows ?? [])
+    .map((row) => ({
+      id: row.id,
+      invoice_no: row.invoice_no,
+      due_date: row.due_date,
+      balance:
+        Number(row.total) - Number(row.amount_paid) - Number(row.credited_amount),
+    }))
+    .filter((row) => row.balance > 0);
 
   return (
     <>
@@ -168,6 +220,22 @@ export default async function PaymentDetailPage({
         </div>
       </div>
 
+      {canApply ? (
+        <div className="mb-6">
+          <Card
+            title="Apply this credit"
+            description="Set what is left of this payment against the tenant's open invoices. The credit moves from their account to the bill."
+          >
+            <ApplyCreditForm
+              action={applyPrepayment}
+              paymentId={payment.id}
+              unapplied={unapplied}
+              invoices={openBills}
+            />
+          </Card>
+        </div>
+      ) : null}
+
       <div className="mb-6">
         <Card title="Applied to" bodyClassName="">
           {payment.payment_applications && payment.payment_applications.length > 0 ? (
@@ -178,6 +246,7 @@ export default async function PaymentDetailPage({
                     <th>Invoice</th>
                     <th>Due</th>
                     <th className="text-right">Applied</th>
+                    {canUnapply ? <th /> : null}
                   </tr>
                 </thead>
                 <tbody>
@@ -197,6 +266,26 @@ export default async function PaymentDetailPage({
                       </td>
                       <td className="text-xs">{formatDate(row.invoices?.due_date)}</td>
                       <td className="text-right tabular-nums">{money(row.amount)}</td>
+                      {canUnapply ? (
+                        <td className="text-right">
+                          {/* Removing it reverses the posting, so the credit
+                              returns to the tenant's account. */}
+                          <form action={unapplyPayment}>
+                            <input type="hidden" name="id" value={row.id} />
+                            <input
+                              type="hidden"
+                              name="payment_id"
+                              value={payment.id}
+                            />
+                            <button
+                              type="submit"
+                              className="btn btn-secondary btn-sm"
+                            >
+                              Unapply
+                            </button>
+                          </form>
+                        </td>
+                      ) : null}
                     </tr>
                   ))}
                 </tbody>
