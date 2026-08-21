@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 
+import { PrintStamp } from "@/components/print-stamp";
 import { requireSession } from "@/lib/auth";
 import { MODULE, can } from "@/lib/permissions";
 
@@ -299,6 +300,9 @@ export default async function AppLayout({
           {children}
         </div>
       </main>
+      {/* Every printable document carries when it was printed, so no page
+          has to remember to add it. Hidden on screen. */}
+      <PrintStamp />
     </div>
   );
 }

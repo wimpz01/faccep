@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useMemo, useState } from "react";
+import { useActionState, useEffect, useMemo, useState } from "react";
 import { useFormStatus } from "react-dom";
 
 import { FormError } from "@/components/ui";
@@ -26,13 +26,21 @@ export type OpenInvoice = {
   suggestedVat: number;
 };
 
-function Submit({ label, danger }: { label: string; danger?: boolean }) {
+function Submit({
+  label,
+  danger,
+  disabled,
+}: {
+  label: string;
+  danger?: boolean;
+  disabled?: boolean;
+}) {
   const { pending } = useFormStatus();
   return (
     <button
       type="submit"
       className={danger ? "btn btn-danger" : "btn btn-primary"}
-      disabled={pending}
+      disabled={pending || disabled}
     >
       {pending ? "Working…" : label}
     </button>
@@ -82,6 +90,12 @@ export function RecordPaymentForm({
   const [mode, setMode] = useState("cash");
   const [fundKind, setFundKind] = useState("security_deposit");
   const [postdated, setPostdated] = useState(false);
+  const [chequeDate, setChequeDate] = useState('');
+  // Held because a cheque is postdated relative to this, not to today.
+  const [date, setDate] = useState(() =>
+    new Date().toISOString().slice(0, 10),
+  );
+  const [chequeAmount, setChequeAmount] = useState('');
   const [applied, setApplied] = useState<Record<string, string>>({});
   /*
    * Tax the tenant kept back, per invoice. Not part of the payment amount --
@@ -90,7 +104,9 @@ export function RecordPaymentForm({
    */
   const [withheld, setWithheld] = useState<Record<string, string>>({});
 
-  const isCheque = mode === "check";
+  // Both modes carry a cheque, so both need its bank, number and date.
+  const isCheque = mode === "check" || mode === "cash_check";
+  const isSplit = mode === "cash_check";
   /*
    * A deposit is held against one contract, not against the tenant at large:
    * each unit is its own contract and carries its own deposit. A refund then
@@ -103,9 +119,32 @@ export function RecordPaymentForm({
     [contracts, tenantId],
   );
   const chosenContract = tenantContracts.find((row) => row.id === contractId);
+  /*
+   * A cheque written for a later date is postdated by definition, so the
+   * box ticks itself rather than waiting to be remembered. It stays
+   * editable: a cheque dated today can still be held rather than banked.
+   */
+  const looksPostdated =
+    isCheque && chequeDate !== '' && date !== '' && chequeDate > date;
+
+  useEffect(() => {
+    if (looksPostdated) setPostdated(true);
+  }, [looksPostdated]);
+
   // A postdated cheque is a promise, not cash. It is tracked against the
   // tenant until it clears, so it settles nothing on the way in.
   const isPostdated = isCheque && postdated;
+
+  /*
+   * Cash only ever tops up a cheque that is money today. A postdated one
+   * goes to the register on its own, so the split is refused here as well
+   * as in the database.
+   */
+  const splitIsPostdated = isSplit && (looksPostdated || postdated);
+  const cashPart =
+    isSplit && amount !== '' && chequeAmount !== ''
+      ? round2(Number(amount) - Number(chequeAmount))
+      : null;
 
   const invoices = useMemo(
     () => openInvoices.filter((invoice) => invoice.tenant_id === tenantId),
@@ -329,7 +368,8 @@ export function RecordPaymentForm({
           type="date"
           className="input"
           required
-          defaultValue={new Date().toISOString().slice(0, 10)}
+          value={date}
+          onChange={(event) => setDate(event.currentTarget.value)}
         />
       </div>
 
@@ -363,14 +403,23 @@ export function RecordPaymentForm({
           onChange={(event) => {
             const next = event.currentTarget.value;
             setMode(next);
+            // Only a cheque can be held rather than banked, and a split
+            // never can, so the flag clears with the mode.
             if (next !== "check") setPostdated(false);
+            if (next !== "cash_check") setChequeAmount("");
           }}
         >
           <option value="cash">Cash</option>
           <option value="gcash">GCash</option>
           <option value="check">Cheque</option>
+          <option value="cash_check">Cash + cheque</option>
           <option value="bank_transfer">Bank transfer</option>
         </select>
+        {isSplit ? (
+          <p className="text-xs muted mt-1">
+            For a cheque written short, with cash making up the balance.
+          </p>
+        ) : null}
       </div>
 
       <div>
@@ -395,6 +444,41 @@ export function RecordPaymentForm({
             <input id="check_bank" name="check_bank" className="input" required />
           </div>
 
+          {isSplit ? (
+            <div>
+              <label className="label" htmlFor="cheque_amount">
+                Cheque amount (₱) *
+              </label>
+              <input
+                id="cheque_amount"
+                name="cheque_amount"
+                type="number"
+                step="0.01"
+                min="0"
+                required
+                className="input tabular-nums"
+                value={chequeAmount}
+                onChange={(event) => setChequeAmount(event.currentTarget.value)}
+              />
+              {/* The cash is whatever the cheque does not cover, shown so the
+                  drawer can be counted against the receipt. */}
+              {cashPart === null ? (
+                <p className="text-xs muted mt-1">
+                  The rest of the amount is taken as cash.
+                </p>
+              ) : cashPart > 0 ? (
+                <p className="text-xs muted mt-1">
+                  Cash {money(cashPart)} · cheque {money(Number(chequeAmount))}
+                </p>
+              ) : (
+                <p className="text-xs mt-1" style={{ color: "var(--danger)" }}>
+                  The cheque must be less than the {money(Number(amount) || 0)}{' '}
+                  total — record it as a cheque payment if no cash came with it.
+                </p>
+              )}
+            </div>
+          ) : null}
+
           <div>
             <label className="label" htmlFor="check_date">
               Cheque date *
@@ -405,8 +489,14 @@ export function RecordPaymentForm({
               type="date"
               className="input"
               required
+              value={chequeDate}
+              onChange={(event) => setChequeDate(event.currentTarget.value)}
             />
-            <p className="text-xs muted mt-1">The date written on the cheque.</p>
+            <p className="text-xs muted mt-1">
+              {looksPostdated
+                ? 'Dated after the payment date, so this is a postdated cheque.'
+                : 'The date written on the cheque.'}
+            </p>
           </div>
 
           <div>
@@ -425,6 +515,11 @@ export function RecordPaymentForm({
               />
               <span>Not yet deposited</span>
             </label>
+            {looksPostdated ? (
+              <p className="text-xs muted mt-1">
+                Ticked for you — the cheque is dated ahead.
+              </p>
+            ) : null}
           </div>
         </>
       ) : null}
@@ -652,7 +747,18 @@ export function RecordPaymentForm({
       </div>
 
       <div className="sm:col-span-3 flex items-center gap-3 flex-wrap">
-        <Submit label={isPostdated ? "Record postdated cheque" : "Record payment"} />
+        <Submit
+          label={isPostdated ? "Record postdated cheque" : "Record payment"}
+          disabled={splitIsPostdated || (isSplit && cashPart !== null && cashPart <= 0)}
+        />
+        {/* A split cannot carry a promise: the receipt would count money
+            that has not arrived. */}
+        {splitIsPostdated ? (
+          <p className="text-sm" style={{ color: "var(--danger)" }}>
+            That cheque is dated ahead, so it cannot be receipted with cash.
+            Record the postdated cheque on its own and the cash separately.
+          </p>
+        ) : null}
         <Result state={state} />
       </div>
     </form>

@@ -21,7 +21,9 @@ const paymentSchema = z.object({
   payment_kind: z.enum(["payment", "prepayment", "deposit", "refund"]),
   // Only a refund carries one; the database refuses it on anything else.
   fund_kind: z.enum(["security_deposit", "advance_payment"]).nullish().or(z.literal("")),
-  payment_mode: z.enum(["cash", "gcash", "check", "bank_transfer"]),
+  payment_mode: z.enum(["cash", "gcash", "check", "cash_check", "bank_transfer"]),
+  // Only on a cash-and-cheque receipt; the cash is the remainder.
+  cheque_amount: z.coerce.number().nullish(),
   payment_date: z.string().min(10, "Choose the payment date."),
   amount: z.coerce.number().positive("Enter an amount greater than zero."),
   reference: z.string().trim().nullish().or(z.literal("")),
@@ -54,6 +56,7 @@ export async function recordPayment(
     payment_kind: formData.get("payment_kind"),
     fund_kind: formData.get("fund_kind"),
     payment_mode: formData.get("payment_mode"),
+    cheque_amount: formData.get("cheque_amount") || null,
     payment_date: formData.get("payment_date"),
     amount: formData.get("amount"),
     reference: formData.get("reference"),
@@ -64,6 +67,41 @@ export async function recordPayment(
   if (!parsed.success) return { error: parsed.error.issues[0].message };
 
   const supabase = await createClient();
+
+  /*
+   * Cash only ever tops up a cheque that is money today. A cheque dated
+   * ahead is a promise: it belongs in the postdated register on its own, and
+   * receipting it alongside cash would put money in the day's takings that
+   * has not arrived. The database refuses this too; saying it here gives a
+   * sentence rather than a constraint message.
+   */
+  if (parsed.data.payment_mode === "cash_check") {
+    const cheque = Number(parsed.data.cheque_amount ?? 0);
+    if (!cheque || cheque <= 0) {
+      return { error: "Enter how much of the receipt was paid by cheque." };
+    }
+    if (cheque >= parsed.data.amount) {
+      return {
+        error:
+          "The cheque part must be less than the total — record it as a cheque payment if no cash came with it.",
+      };
+    }
+    if (!parsed.data.check_bank || !parsed.data.check_date) {
+      return { error: "Enter the drawee bank and the date on the cheque." };
+    }
+    if (parsed.data.check_date > parsed.data.payment_date) {
+      return {
+        error:
+          "That cheque is dated ahead, so it cannot be receipted with cash. Record the postdated cheque on its own and the cash separately.",
+      };
+    }
+    if (formData.get("postdated") === "on") {
+      return {
+        error:
+          "A cash-and-cheque receipt cannot be held undeposited — the cash is already in hand.",
+      };
+    }
+  }
 
   // A cheque dated in the future is not a collection. It is held against the
   // tenant under Postdated cheques and only becomes a payment once deposited,
@@ -184,6 +222,11 @@ export async function recordPayment(
     .insert({
       company_id: companyId,
       ...parsed.data,
+      // Carried only on a split; the database refuses it anywhere else.
+      cheque_amount:
+        parsed.data.payment_mode === "cash_check"
+          ? parsed.data.cheque_amount
+          : null,
       contract_id: parsed.data.contract_id || null,
       // Carried only on a refund; the database refuses it on anything else.
       fund_kind:

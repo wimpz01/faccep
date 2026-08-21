@@ -403,4 +403,14 @@ body {
   .doc-page-break {
     break-before: page;
   }
+
+  /* When the document was printed, at the foot of every sheet. */
+  .print-stamp {
+    position: fixed;
+    right: 0;
+    bottom: 0;
+    font-size: 8pt;
+    color: #6b7280;
+    letter-spacing: 0.02em;
+  }
 }
