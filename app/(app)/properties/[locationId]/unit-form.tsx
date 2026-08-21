@@ -178,6 +178,13 @@ export function UnitForm({
           className="input"
           defaultValue={unit?.monthly_rate != null ? String(unit.monthly_rate) : "0"}
         />
+        {/* The rate is the floor every lease on this unit is priced from,
+            so it moves by approval rather than by saving this form. */}
+        <p className="text-xs muted mt-1">
+          {unit
+            ? "Changing this raises it for approval. The unit keeps its current rate until someone with Approve on units signs it off."
+            : "Goes to Approvals. The unit is created without a rate and cannot be let until the rate is signed off."}
+        </p>
       </div>
 
       <div>

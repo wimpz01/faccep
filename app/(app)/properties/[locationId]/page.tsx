@@ -87,6 +87,21 @@ export default async function LocationUnitsPage({
     .order("code")
     .returns<UnitRow[]>();
 
+  /*
+   * Rates proposed but not yet agreed. Shown beside the rate in force so the
+   * list never implies a figure is live when it is still with an approver.
+   */
+  const { data: pendingRates } = await supabase
+    .from("unit_rate_changes")
+    .select("unit_id, proposed_rate")
+    .eq("company_id", companyId)
+    .eq("status", "pending")
+    .returns<{ unit_id: string; proposed_rate: string }[]>();
+
+  const pendingRate = new Map(
+    (pendingRates ?? []).map((row) => [row.unit_id, Number(row.proposed_rate)]),
+  );
+
   // Private bucket, so every thumbnail needs a short-lived signed URL.
   const photoPaths = (units ?? []).flatMap((unit) =>
     (unit.unit_photos ?? []).map((photo) => photo.storage_path),
@@ -159,6 +174,15 @@ export default async function LocationUnitsPage({
                       <span className="font-semibold text-sm tabular-nums">
                         {money(unit.monthly_rate)}
                       </span>
+                      {/* A rate nobody has agreed yet is not the rate. */}
+                      {pendingRate.get(unit.id) !== undefined ? (
+                        <span
+                          className="text-xs"
+                          style={{ color: "var(--color-gold-500)" }}
+                        >
+                          {money(pendingRate.get(unit.id)!)} awaiting approval
+                        </span>
+                      ) : null}
                       {unit.area_sqm ? (
                         <span className="text-xs muted">{unit.area_sqm} sqm</span>
                       ) : null}

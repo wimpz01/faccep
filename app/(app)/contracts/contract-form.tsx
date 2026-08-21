@@ -319,6 +319,14 @@ export function ContractForm({
     .filter((unit) => selectedUnits.includes(unit.id))
     .reduce((sum, unit) => sum + Number(unit.monthly_rate), 0);
 
+  /*
+   * A contract may be let above the units' agreed rates but never below.
+   * A unit carrying nothing sets no floor, which is why this only bites
+   * once the selection totals something.
+   */
+  const belowFloor =
+    selectedTotal > 0 && rent !== '' && Number(rent) < selectedTotal - 0.005;
+
   return (
     <form action={formAction} className="flex flex-col gap-5">
       {contract?.id ? <input type="hidden" name="id" value={contract.id} /> : null}
@@ -518,12 +526,26 @@ export function ContractForm({
               name="monthly_rent"
               type="number"
               step="0.01"
-              min="0"
+              min={selectedTotal > 0 ? selectedTotal : 0}
               className="input"
               required
               value={rent}
               onChange={(event) => setRent(event.currentTarget.value)}
+              style={{ borderColor: belowFloor ? "var(--danger)" : undefined }}
             />
+            {/* The units' agreed rates are the least this may be let for.
+                Saying so here saves finding out when the save is refused. */}
+            {belowFloor ? (
+              <p className="text-xs mt-1" style={{ color: "var(--danger)" }}>
+                Below the {money(selectedTotal)} these units are rated at. A
+                higher rent is fine; a lower one needs the unit rate changed
+                first, with approval.
+              </p>
+            ) : selectedTotal > 0 ? (
+              <p className="text-xs muted mt-1">
+                At least {money(selectedTotal)} — the rate these units carry.
+              </p>
+            ) : null}
           </div>
 
           <div>

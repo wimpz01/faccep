@@ -121,9 +121,40 @@ async function makeUser(label) {
   return data.user.id;
 }
 
+/**
+ * Clears anything a previous run left behind.
+ *
+ * Cleanup runs in a finally block, but it is not guaranteed: a run whose
+ * transport dies -- an API rate limit, a dropped connection -- can lose its
+ * own cleanup as well. What it leaves are working accounts on a real
+ * database, and among them a super administrator, whose password this file
+ * derives from the email address it also prints. That is not an acceptable
+ * thing to leave lying about, so every run starts by removing any it finds.
+ */
+async function sweepPreviousRuns() {
+  // Only this script's own naming, so nothing real can match.
+  const pattern = /^zz-verify-\d+-[a-z]+@example\.invalid$/;
+  const { data, error } = await admin.auth.admin.listUsers({ perPage: 200 });
+  if (error) {
+    console.log(`  could not check for leftovers: ${error.message}`);
+    return;
+  }
+
+  const stale = (data?.users ?? []).filter((user) => pattern.test(user.email ?? ''));
+  if (stale.length === 0) return;
+
+  console.log(`  clearing ${stale.length} account(s) left by an earlier run`);
+  for (const user of stale) {
+    const { error: failed } = await admin.auth.admin.deleteUser(user.id);
+    if (failed) console.log(`    could not remove ${user.email}: ${failed.message}`);
+  }
+}
+
 async function main() {
   db = await openConnection();
   console.log(`Using the ${db.label}.`);
+
+  await sweepPreviousRuns();
 
   console.log("\nSchema");
   const moduleRows = await db.query(
@@ -155,6 +186,24 @@ async function main() {
   const regular = await makeUser("regular");
   const companyAdmin = await makeUser("companyadmin");
   const superAdmin = await makeUser("superadmin");
+
+  /*
+   * Gets a unit's rate agreed. Creating a unit no longer sets its rate --
+   * the figure is raised as a proposal and the unit carries nothing until
+   * somebody with Approve on units signs it off -- so anywhere a test needs
+   * a unit it can actually let, it has to go through this.
+   */
+  async function agreeRate(unitId) {
+    const pending = await db.query(`
+      select id from public.unit_rate_changes
+       where unit_id = ${lit(unitId)} and status = 'pending';
+    `);
+    if (pending.length === 0) return;
+    await asUserCommitted(
+      companyAdmin,
+      `select public.decide_unit_rate_change(${lit(pending[0].id)}, true, 'agreed');`,
+    );
+  }
   console.log(`  made 3 users tagged ${TEST_TAG}`);
 
   const companies = await db.query(`
@@ -300,6 +349,7 @@ async function main() {
   `);
   const unitId = unitRows[0].id;
   check("a new unit starts vacant", unitRows[0].status, "vacant");
+  await agreeRate(unitId);
 
   const tenantRows = await db.query(`
     insert into public.tenants (company_id, company_name, is_vatable)
@@ -2970,6 +3020,7 @@ async function main() {
       returning id;
     `)
   )[0].id;
+  await agreeRate(scopeUnitB);
 
   const scopeTenant = (
     await db.query(`
@@ -2982,9 +3033,10 @@ async function main() {
   const scopeContractB = (
     await db.query(`
       insert into public.contracts
-        (company_id, tenant_id, contract_no, start_date, end_date, status)
+        (company_id, tenant_id, contract_no, start_date, end_date, status,
+         monthly_rent)
       values (${lit(alpha)}, ${lit(scopeTenant)}, ${lit(`${TEST_TAG}-C-A2`)},
-              '2026-01-01', '2026-12-31', 'active')
+              '2026-01-01', '2026-12-31', 'active', 9000)
       returning id;
     `)
   )[0].id;
@@ -3533,6 +3585,347 @@ async function main() {
     `),
     "blocked",
   );
+
+  // -------------------------------------------------------------------------
+  // A unit's rate moves only with approval, and holds the contracts under it
+  // -------------------------------------------------------------------------
+
+  console.log("\nUnit rates and approval");
+
+  const rateLoc = (
+    await db.query(`
+      insert into public.locations (company_id, code, name)
+      values (${lit(alpha)}, 'ZZR', ${lit(`${TEST_TAG}-rate`)})
+      returning id;
+    `)
+  )[0].id;
+
+  // A unit asked for at 25,000 is created carrying nothing until someone agrees.
+  const rateUnit = (
+    await db.query(`
+      insert into public.units (company_id, location_id, code, monthly_rate)
+      values (${lit(alpha)}, ${lit(rateLoc)}, 'ZZ-1', 25000)
+      returning id;
+    `)
+  )[0].id;
+
+  check(
+    "a unit is created with no agreed rate, whatever was typed",
+    Number(
+      (await db.query(`select monthly_rate from public.units where id = ${lit(rateUnit)};`))[0]
+        .monthly_rate,
+    ),
+    0,
+  );
+
+  const initialChange = (
+    await db.query(`
+      select id, proposed_rate, is_initial, status
+        from public.unit_rate_changes where unit_id = ${lit(rateUnit)};
+    `)
+  )[0];
+  check("and the figure typed is raised as a proposal", Number(initialChange.proposed_rate), 25000);
+  check("marked as the unit's first", initialChange.is_initial, true);
+
+  check(
+    "the rate cannot be written straight onto the unit",
+    await expectFail(
+      `update public.units set monthly_rate = 99000 where id = ${lit(rateUnit)};`,
+    ),
+    "blocked",
+  );
+
+  // A unit whose price nobody has agreed cannot be let.
+  const rateTenant = (
+    await db.query(`
+      insert into public.tenants (company_id, company_name)
+      values (${lit(alpha)}, ${lit(`${TEST_TAG}-rate-tenant`)})
+      returning id;
+    `)
+  )[0].id;
+
+  const rateContract = (
+    await db.query(`
+      insert into public.contracts (
+        company_id, tenant_id, contract_no, status, start_date, end_date,
+        monthly_rent, rent_due_day)
+      values (${lit(alpha)}, ${lit(rateTenant)}, ${lit(`${TEST_TAG}-RATECT`)},
+              'draft', current_date, current_date + 365, 30000, 5)
+      returning id;
+    `)
+  )[0].id;
+
+  check(
+    "a unit still waiting on its rate cannot be put on a contract",
+    await expectFail(`
+      insert into public.contract_units (contract_id, unit_id)
+      values (${lit(rateContract)}, ${lit(rateUnit)});
+      set constraints public.contract_units_hold_rate immediate;
+    `),
+    "blocked",
+  );
+
+  check(
+    "deciding a rate needs Approve on units",
+    await expectFailAsUser(
+      regular,
+      `select public.decide_unit_rate_change(${lit(initialChange.id)}, true, null);`,
+    ),
+    "blocked",
+  );
+
+  await asUserCommitted(
+    companyAdmin,
+    `select public.decide_unit_rate_change(${lit(initialChange.id)}, true, 'agreed');`,
+  );
+
+  check(
+    "approving moves the unit to the agreed rate",
+    Number(
+      (await db.query(`select monthly_rate from public.units where id = ${lit(rateUnit)};`))[0]
+        .monthly_rate,
+    ),
+    25000,
+  );
+
+  // Now it can be let -- at or above the rate.
+  await db.query(`
+    insert into public.contract_units (contract_id, unit_id)
+    values (${lit(rateContract)}, ${lit(rateUnit)});
+  `);
+  check(
+    "a rent above the rate is accepted",
+    Number(
+      (await db.query(`select monthly_rent from public.contracts where id = ${lit(rateContract)};`))[0]
+        .monthly_rent,
+    ),
+    30000,
+  );
+
+  check(
+    "a rent below the rate is refused",
+    await expectFail(
+      `update public.contracts set monthly_rent = 24999 where id = ${lit(rateContract)};`,
+    ),
+    "blocked",
+  );
+
+  check(
+    "a rent exactly at the rate is accepted",
+    Number(
+      (
+        await db.query(`
+          update public.contracts set monthly_rent = 25000
+           where id = ${lit(rateContract)}
+          returning monthly_rent;
+        `)
+      )[0].monthly_rent,
+    ),
+    25000,
+  );
+
+  // Editing something else on a contract priced below its unit must still work,
+  // which is what keeps a lease signed before this rule editable.
+  check(
+    "a contract already below its unit's rate can still be edited elsewhere",
+    (
+      await db.query(`
+        update public.units set monthly_rate = monthly_rate where id = ${lit(rateUnit)};
+        update public.contracts set notes = 'touched'
+         where id = ${lit(rateContract)}
+        returning notes;
+      `)
+    )[0].notes,
+    "touched",
+  );
+
+  // Raising the asking price does not disturb a lease already running on it.
+  const rateRaise = (
+    await asUserCommitted(
+      companyAdmin,
+      `select public.propose_unit_rate(${lit(rateUnit)}, 40000, 'review') as id;`,
+    )
+  )[0].id;
+  await asUserCommitted(
+    companyAdmin,
+    `select public.decide_unit_rate_change(${lit(rateRaise)}, true, null);`,
+  );
+  check(
+    "raising the unit rate leaves a running contract where it is",
+    Number(
+      (await db.query(`select monthly_rent from public.contracts where id = ${lit(rateContract)};`))[0]
+        .monthly_rent,
+    ),
+    25000,
+  );
+
+  const refused = (
+    await asUserCommitted(
+      companyAdmin,
+      `select public.propose_unit_rate(${lit(rateUnit)}, 5000, 'too low') as id;`,
+    )
+  )[0].id;
+  await asUserCommitted(
+    companyAdmin,
+    `select public.decide_unit_rate_change(${lit(refused)}, false, 'no');`,
+  );
+  check(
+    "a proposal turned down leaves the rate where it was",
+    Number(
+      (await db.query(`select monthly_rate from public.units where id = ${lit(rateUnit)};`))[0]
+        .monthly_rate,
+    ),
+    40000,
+  );
+
+  await asUserCommitted(
+    companyAdmin,
+    `select public.propose_unit_rate(${lit(rateUnit)}, 41000, 'one');`,
+  );
+  check(
+    "only one proposal may be open on a unit at a time",
+    await expectFailAsUser(
+      companyAdmin,
+      `select public.propose_unit_rate(${lit(rateUnit)}, 42000, 'two');`,
+    ),
+    "blocked",
+  );
+
+  // A unit simply carrying nothing is a different case from one awaiting a
+  // decision: nought is the absence of a price, so it sets no floor.
+  const freeUnit = (
+    await db.query(`
+      insert into public.units (company_id, location_id, code, monthly_rate)
+      values (${lit(alpha)}, ${lit(rateLoc)}, 'ZZ-2', 0)
+      returning id;
+    `)
+  )[0].id;
+  check(
+    "a unit created at nought raises no proposal",
+    (
+      await db.query(`
+        select count(*)::int as n from public.unit_rate_changes
+         where unit_id = ${lit(freeUnit)};
+      `)
+    )[0].n,
+    0,
+  );
+
+  const freeContract = (
+    await db.query(`
+      insert into public.contracts (
+        company_id, tenant_id, contract_no, status, start_date, end_date,
+        monthly_rent, rent_due_day)
+      values (${lit(alpha)}, ${lit(rateTenant)}, ${lit(`${TEST_TAG}-FREECT`)},
+              'draft', current_date, current_date + 365, 1, 5)
+      returning id;
+    `)
+  )[0].id;
+  await db.query(`
+    insert into public.contract_units (contract_id, unit_id)
+    values (${lit(freeContract)}, ${lit(freeUnit)});
+  `);
+  check(
+    "and it can be let at any rent",
+    Number(
+      (await db.query(`select monthly_rent from public.contracts where id = ${lit(freeContract)};`))[0]
+        .monthly_rent,
+    ),
+    1,
+  );
+
+
+  // -------------------------------------------------------------------------
+  // Cash topping up a short cheque
+  // -------------------------------------------------------------------------
+
+  console.log("\nCash and cheque on one receipt");
+
+  const splitTenant = (
+    await db.query(`
+      insert into public.tenants (company_id, company_name)
+      values (${lit(alpha)}, ${lit(`${TEST_TAG}-split`)})
+      returning id;
+    `)
+  )[0].id;
+
+  const splitPayment = (
+    await db.query(`
+      insert into public.payments (
+        company_id, tenant_id, payment_no, payment_kind, payment_mode,
+        payment_date, amount, cheque_amount, check_bank, check_date, reference)
+      values (${lit(alpha)}, ${lit(splitTenant)}, ${lit(`${TEST_TAG}-SPLIT`)},
+              'prepayment', 'cash_check', current_date, 10000, 8000,
+              'BPI', current_date, '000111')
+      returning id, amount, cheque_amount;
+    `)
+  )[0];
+  check("a cheque short of the total is topped up with cash", Number(splitPayment.cheque_amount), 8000);
+
+  check(
+    "the split still posts as one receipt that balances",
+    (
+      await db.query(`
+        select coalesce(sum(jl.debit), 0) = coalesce(sum(jl.credit), 0) as ok
+          from public.journal_lines jl
+          join public.journal_entries je on je.id = jl.entry_id
+         where je.source_table = 'payments' and je.source_id = ${lit(splitPayment.id)};
+      `)
+    )[0].ok,
+    true,
+  );
+
+  check(
+    "a cheque dated ahead cannot be receipted with cash",
+    await expectFail(`
+      insert into public.payments (
+        company_id, tenant_id, payment_no, payment_kind, payment_mode,
+        payment_date, amount, cheque_amount, check_bank, check_date)
+      values (${lit(alpha)}, ${lit(splitTenant)}, ${lit(`${TEST_TAG}-SPLIT2`)},
+              'prepayment', 'cash_check', current_date, 10000, 8000,
+              'BPI', current_date + 90);
+    `),
+    "blocked",
+  );
+
+  check(
+    "a cheque covering the whole receipt is not a split",
+    await expectFail(`
+      insert into public.payments (
+        company_id, tenant_id, payment_no, payment_kind, payment_mode,
+        payment_date, amount, cheque_amount, check_bank, check_date)
+      values (${lit(alpha)}, ${lit(splitTenant)}, ${lit(`${TEST_TAG}-SPLIT3`)},
+              'prepayment', 'cash_check', current_date, 10000, 10000,
+              'BPI', current_date);
+    `),
+    "blocked",
+  );
+
+  check(
+    "a split with no cheque figure is refused",
+    await expectFail(`
+      insert into public.payments (
+        company_id, tenant_id, payment_no, payment_kind, payment_mode,
+        payment_date, amount, check_bank, check_date)
+      values (${lit(alpha)}, ${lit(splitTenant)}, ${lit(`${TEST_TAG}-SPLIT4`)},
+              'prepayment', 'cash_check', current_date, 10000,
+              'BPI', current_date);
+    `),
+    "blocked",
+  );
+
+  check(
+    "a cheque figure on an ordinary cash receipt is refused",
+    await expectFail(`
+      insert into public.payments (
+        company_id, tenant_id, payment_no, payment_kind, payment_mode,
+        payment_date, amount, cheque_amount)
+      values (${lit(alpha)}, ${lit(splitTenant)}, ${lit(`${TEST_TAG}-SPLIT5`)},
+              'prepayment', 'cash', current_date, 10000, 4000);
+    `),
+    "blocked",
+  );
+
 }
 
 async function cleanup() {

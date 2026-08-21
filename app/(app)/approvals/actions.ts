@@ -74,6 +74,7 @@ export async function decideApproval(
   revalidatePath("/billing/invoices");
   revalidatePath("/payments");
   revalidatePath("/purchasing/vendors");
+  revalidatePath("/properties");
   return {
     success:
       decision === "approved"
@@ -91,6 +92,18 @@ export async function decideApproval(
  * them or they would sit pending forever.
  */
 async function applyRejection(request: PendingRequest): Promise<string | null> {
+  // A rate change turned down has to be recorded as such, or it stays open
+  // and blocks the next proposal on that unit.
+  if (request.entity_table === "unit_rate_changes") {
+    const supabase = await createClient();
+    const { error } = await supabase.rpc("decide_unit_rate_change", {
+      p_change: request.entity_id,
+      p_approve: false,
+      p_note: request.reason,
+    });
+    return error?.message ?? null;
+  }
+
   if (request.entity_table !== "vendors") return null;
 
   const supabase = await createClient();
@@ -166,6 +179,21 @@ async function applyEffect(request: PendingRequest): Promise<string | null> {
       status: "released",
       released_at: new Date().toISOString(),
     });
+  }
+
+  /**
+   * A unit rate moves only here. The database refuses a direct write to the
+   * column, so the function is the one path there is, and it stamps the
+   * decision on the rate change at the same time.
+   */
+  if (request.entity_table === "unit_rate_changes" && request.action === "approve") {
+    const supabase = await createClient();
+    const { error } = await supabase.rpc("decide_unit_rate_change", {
+      p_change: request.entity_id,
+      p_approve: true,
+      p_note: null,
+    });
+    return error?.message ?? null;
   }
 
   if (request.entity_table === "vendors" && request.action === "approve") {

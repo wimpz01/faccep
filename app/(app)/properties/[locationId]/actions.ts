@@ -108,7 +108,20 @@ export async function createUnit(
 
   revalidatePath(`/properties/${locationId}`);
   revalidatePath("/properties");
-  return { success: `Unit ${data.code} created.`, unitId: data.id };
+  revalidatePath("/approvals");
+  /*
+   * The rate typed on the form is not the rate the unit carries. It has been
+   * raised for approval, and until somebody agrees it the unit has no price
+   * and cannot be let -- which is worth saying plainly here rather than
+   * leaving it to be discovered at the point a contract is refused.
+   */
+  return {
+    success:
+      parsed.data.monthly_rate > 0
+        ? `Unit ${data.code} created. Its rate of ${parsed.data.monthly_rate.toFixed(2)} has gone to Approvals — the unit carries no rate, and cannot be put on a contract, until that is signed off.`
+        : `Unit ${data.code} created.`,
+    unitId: data.id,
+  };
 }
 
 export async function updateUnit(
@@ -135,7 +148,13 @@ export async function updateUnit(
     .eq("id", id)
     .single();
 
-  const row = toRow(parsed.data);
+  /*
+   * The rate is left out of the update on purpose. It moves only by
+   * approval -- the database refuses a direct write to the column -- so a
+   * changed figure is raised as a proposal below and everything else on the
+   * unit saves as it always did.
+   */
+  const { monthly_rate: proposedRate, ...row } = toRow(parsed.data);
   const { error } = await supabase.from("units").update(row).eq("id", id);
 
   if (error) {
@@ -152,7 +171,7 @@ export async function updateUnit(
         code: row.code,
         floor: row.floor,
         area_sqm: row.area_sqm,
-        monthly_rate: row.monthly_rate,
+        // The rate is not part of this update; it moves by approval.
         description: row.description,
         water_meter_serial: row.water_meter_serial,
         electric_meter_serial: row.electric_meter_serial,
@@ -169,8 +188,47 @@ export async function updateUnit(
     after: diff.after,
   });
 
+  /*
+   * A changed rate goes to whoever holds Approve on units. The unit keeps
+   * the rate it has until they decide, so nothing that reads the rate --
+   * a contract being priced, the potential income on the property page --
+   * moves in the meantime.
+   */
+  let rateNote = '';
+  if (before && Number(before.monthly_rate) !== Number(proposedRate)) {
+    const { error: rateError } = await supabase.rpc("propose_unit_rate", {
+      p_unit: id,
+      p_rate: proposedRate,
+      p_reason: null,
+    });
+
+    if (rateError) {
+      // The rest of the unit saved, so this reports what did not.
+      return {
+        error:
+          rateError.code === "23505"
+            ? "The unit saved, but a rate change is already waiting on approval for it."
+            : `The unit saved, but the rate change was not raised: ${rateError.message}`,
+      };
+    }
+
+    await logAudit({
+      action: "update",
+      moduleKey: MODULE.units,
+      entityTable: "units",
+      entityId: id,
+      summary: `Proposed moving unit ${row.code} from ${Number(before.monthly_rate).toFixed(2)} to ${Number(proposedRate).toFixed(2)}; awaiting approval.`,
+      before: { monthly_rate: before.monthly_rate },
+      after: { monthly_rate: proposedRate },
+    });
+
+    rateNote =
+      " The rate change has gone to Approvals — the unit keeps its current rate until it is signed off.";
+  }
+
   revalidatePath(`/properties/${locationId}`);
-  return { success: "Unit updated." };
+  revalidatePath("/approvals");
+  return { success: `Unit updated.${rateNote}` };
 }
 
 /**
