@@ -14,7 +14,18 @@ export type OpenBill = {
   invoice_no: string;
   due_date: string;
   balance: number;
+  /** What the configured rates say this tenant would withhold. Advisory. */
+  suggestedTax: number;
+  suggestedVat: number;
 };
+
+type Line = { amount: string; tax: string; vat: string; form: string };
+
+const EMPTY: Line = { amount: "", tax: "", vat: "", form: "" };
+
+function num(value: string) {
+  return Number(value) || 0;
+}
 
 function Submit({ label, disabled }: { label: string; disabled?: boolean }) {
   const { pending } = useFormStatus();
@@ -36,39 +47,81 @@ function Submit({ label, disabled }: { label: string; disabled?: boolean }) {
  * rarely matches a bill exactly, and part-settling one is the ordinary case.
  * Nothing may be applied beyond what is left unapplied, which is checked here
  * and again on the server.
+ *
+ * A withholding tenant pays less than the invoice on purpose, so each line
+ * carries what they withheld beside what they paid. The two together are what
+ * settles the bill: on a 10,000 rent a tenant hands over 9,553.57 and remits
+ * 446.43 to the BIR for us, and the invoice is paid in full. Ticking the box
+ * fills both at the configured rate, and both stay editable -- what is
+ * recorded is what the tenant actually withheld, not what we expected.
  */
 export function ApplyCreditForm({
   action,
   paymentId,
   unapplied,
   invoices,
+  tenantWithholds,
+  tenantIsGovernment,
 }: {
   action: (state: ActionState, formData: FormData) => Promise<ActionState>;
   paymentId: string;
   unapplied: number;
   invoices: OpenBill[];
+  tenantWithholds: boolean;
+  tenantIsGovernment: boolean;
 }) {
   const [state, formAction] = useActionState<ActionState, FormData>(action, {});
-  const [amounts, setAmounts] = useState<Record<string, string>>({});
+  const [lines, setLines] = useState<Record<string, Line>>({});
 
-  const total = round2(
-    Object.values(amounts).reduce((sum, value) => sum + (Number(value) || 0), 0),
+  const line = (id: string) => lines[id] ?? EMPTY;
+
+  const cashTotal = round2(
+    Object.values(lines).reduce((sum, row) => sum + num(row.amount), 0),
   );
-  const over = total > round2(unapplied);
+  const withheldTotal = round2(
+    Object.values(lines).reduce((sum, row) => sum + num(row.tax) + num(row.vat), 0),
+  );
+  const over = cashTotal > round2(unapplied);
+
+  function set(id: string, patch: Partial<Line>) {
+    setLines((current) => ({
+      ...current,
+      [id]: { ...(current[id] ?? EMPTY), ...patch },
+    }));
+  }
+
+  /** Cash still unspent, ignoring one invoice's own line. */
+  function cashLeftExcluding(current: Record<string, Line>, exceptId: string) {
+    const used = round2(
+      Object.entries(current)
+        .filter(([id]) => id !== exceptId)
+        .reduce((sum, [, row]) => sum + num(row.amount), 0),
+    );
+    return round2(unapplied - used);
+  }
 
   /** Fills the oldest bills first until the credit runs out. */
   function oldestFirst() {
     let left = unapplied;
-    const next: Record<string, string> = {};
+    const next: Record<string, Line> = {};
     for (const invoice of [...invoices].sort((a, b) =>
       a.due_date.localeCompare(b.due_date),
     )) {
       if (left <= 0) break;
-      const take = Math.min(left, invoice.balance);
-      next[invoice.id] = take.toFixed(2);
+      const withheld = tenantWithholds
+        ? Math.min(round2(invoice.suggestedTax + invoice.suggestedVat), invoice.balance)
+        : 0;
+      const take = Math.min(left, round2(invoice.balance - withheld));
+      if (take <= 0 && withheld <= 0) continue;
+      next[invoice.id] = {
+        amount: take.toFixed(2),
+        tax: tenantWithholds && invoice.suggestedTax > 0 ? invoice.suggestedTax.toFixed(2) : "",
+        vat: tenantIsGovernment && invoice.suggestedVat > 0 ? invoice.suggestedVat.toFixed(2) : "",
+        form: "",
+      };
       left = round2(left - take);
     }
-    setAmounts(next);
+    setLines(next);
   }
 
   if (invoices.length === 0) {
@@ -95,15 +148,21 @@ export function ApplyCreditForm({
         <button
           type="button"
           className="btn btn-secondary btn-sm"
-          onClick={() => setAmounts({})}
-          disabled={total === 0}
+          onClick={() => setLines({})}
+          disabled={cashTotal === 0 && withheldTotal === 0}
         >
           Clear
         </button>
-        <span className="text-xs muted">
-          {money(unapplied)} unapplied
-        </span>
+        <span className="text-xs muted">{money(unapplied)} unapplied</span>
       </div>
+
+      {tenantWithholds ? (
+        <p className="text-xs muted">
+          This tenant withholds tax from their rent. Ticking an invoice fills
+          the cash and the withheld tax at the configured rate — change either
+          if what they actually withheld differs.
+        </p>
+      ) : null}
 
       <div className="table-scroll">
         <table className="table">
@@ -113,41 +172,67 @@ export function ApplyCreditForm({
               <th>Invoice</th>
               <th>Due</th>
               <th className="text-right">Balance</th>
-              <th className="text-right" style={{ width: "10rem" }}>
-                Amount applied
+              <th className="text-right" style={{ width: "9rem" }}>
+                Cash applied
               </th>
+              <th className="text-right" style={{ width: "9rem" }}>
+                Tax withheld
+              </th>
+              {tenantIsGovernment ? (
+                <th className="text-right" style={{ width: "9rem" }}>
+                  VAT withheld
+                </th>
+              ) : null}
+              <th className="text-right">Settles</th>
             </tr>
           </thead>
           <tbody>
             {invoices.map((invoice) => {
-              const value = amounts[invoice.id] ?? "";
-              const overBalance = Number(value) > invoice.balance;
+              const row = line(invoice.id);
+              const settles = round2(num(row.amount) + num(row.tax) + num(row.vat));
+              const overBalance = settles > invoice.balance + 0.005;
+              const withheldHere = round2(num(row.tax) + num(row.vat));
               return (
                 <tr key={invoice.id}>
                   <td>
                     <input
                       type="checkbox"
                       aria-label={`Set the credit against ${invoice.invoice_no}`}
-                      checked={Number(value) > 0}
+                      checked={settles > 0}
                       onChange={(event) => {
                         const on = event.currentTarget.checked;
-                        setAmounts((current) => {
+                        setLines((current) => {
                           if (!on) {
                             const next = { ...current };
                             delete next[invoice.id];
                             return next;
                           }
-                          const used = round2(
-                            Object.entries(current)
-                              .filter(([id]) => id !== invoice.id)
-                              .reduce((sum, [, v]) => sum + (Number(v) || 0), 0),
-                          );
-                          const left = round2(unapplied - used);
+                          const withheld = tenantWithholds
+                            ? Math.min(
+                                round2(invoice.suggestedTax + invoice.suggestedVat),
+                                invoice.balance,
+                              )
+                            : 0;
+                          const left = cashLeftExcluding(current, invoice.id);
                           const take = Math.min(
                             left > 0 ? left : 0,
-                            invoice.balance,
+                            round2(invoice.balance - withheld),
                           );
-                          return { ...current, [invoice.id]: take.toFixed(2) };
+                          return {
+                            ...current,
+                            [invoice.id]: {
+                              amount: take.toFixed(2),
+                              tax:
+                                tenantWithholds && invoice.suggestedTax > 0
+                                  ? invoice.suggestedTax.toFixed(2)
+                                  : "",
+                              vat:
+                                tenantIsGovernment && invoice.suggestedVat > 0
+                                  ? invoice.suggestedVat.toFixed(2)
+                                  : "",
+                              form: "",
+                            },
+                          };
                         });
                       }}
                     />
@@ -165,19 +250,67 @@ export function ApplyCreditForm({
                       min="0"
                       max={invoice.balance}
                       className="input tabular-nums"
-                      style={{
-                        textAlign: "right",
-                        borderColor: overBalance ? "var(--danger)" : undefined,
-                      }}
-                      value={value}
+                      style={{ textAlign: "right" }}
+                      value={row.amount}
                       onChange={(event) => {
                         const next = event.currentTarget.value;
-                        setAmounts((current) => ({
-                          ...current,
-                          [invoice.id]: next,
-                        }));
+                        set(invoice.id, { amount: next });
                       }}
                     />
+                  </td>
+                  <td>
+                    <input
+                      name={`wht:${invoice.id}`}
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      className="input tabular-nums"
+                      style={{ textAlign: "right" }}
+                      placeholder="0.00"
+                      value={row.tax}
+                      onChange={(event) => {
+                        const next = event.currentTarget.value;
+                        set(invoice.id, { tax: next });
+                      }}
+                    />
+                    {withheldHere > 0 ? (
+                      <input
+                        name={`form2307:${invoice.id}`}
+                        type="text"
+                        className="input mt-1"
+                        style={{ fontSize: "0.75rem" }}
+                        placeholder="2307 ref (optional)"
+                        value={row.form}
+                        onChange={(event) => {
+                          const next = event.currentTarget.value;
+                          set(invoice.id, { form: next });
+                        }}
+                      />
+                    ) : null}
+                  </td>
+                  {tenantIsGovernment ? (
+                    <td>
+                      <input
+                        name={`vat:${invoice.id}`}
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        className="input tabular-nums"
+                        style={{ textAlign: "right" }}
+                        placeholder="0.00"
+                        value={row.vat}
+                        onChange={(event) => {
+                          const next = event.currentTarget.value;
+                          set(invoice.id, { vat: next });
+                        }}
+                      />
+                    </td>
+                  ) : null}
+                  <td
+                    className="text-right tabular-nums text-sm"
+                    style={{ color: overBalance ? "var(--danger)" : undefined }}
+                  >
+                    {money(settles)}
                   </td>
                 </tr>
               );
@@ -187,10 +320,20 @@ export function ApplyCreditForm({
       </div>
 
       <div className="flex items-center gap-3 flex-wrap">
-        <Submit label={`Apply ${money(total)}`} disabled={total <= 0 || over} />
+        <Submit
+          label={`Apply ${money(cashTotal)}`}
+          disabled={(cashTotal <= 0 && withheldTotal <= 0) || over}
+        />
+        {withheldTotal > 0 ? (
+          <span className="text-xs muted">
+            plus {money(withheldTotal)} withheld — settling{" "}
+            {money(round2(cashTotal + withheldTotal))} of invoices
+          </span>
+        ) : null}
         {over ? (
           <p className="text-sm" style={{ color: "var(--danger)" }}>
-            That is {money(round2(total - unapplied))} more than is unapplied.
+            That is {money(round2(cashTotal - unapplied))} more cash than is
+            unapplied.
           </p>
         ) : null}
         <FormError message={state.error} />

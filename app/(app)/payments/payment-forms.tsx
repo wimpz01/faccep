@@ -9,13 +9,21 @@ import { formatDate, money } from "@/lib/format";
 
 import type { ActionState } from "./actions";
 
-export type TenantOption = { id: string; company_name: string };
+export type TenantOption = {
+  id: string;
+  company_name: string;
+  withholds_tax: boolean;
+  is_government: boolean;
+};
 export type OpenInvoice = {
   id: string;
   invoice_no: string;
   tenant_id: string;
   due_date: string;
   balance: number;
+  /** What the configured rates say this tenant would withhold. Advisory. */
+  suggestedTax: number;
+  suggestedVat: number;
 };
 
 function Submit({ label, danger }: { label: string; danger?: boolean }) {
@@ -75,6 +83,12 @@ export function RecordPaymentForm({
   const [fundKind, setFundKind] = useState("security_deposit");
   const [postdated, setPostdated] = useState(false);
   const [applied, setApplied] = useState<Record<string, string>>({});
+  /*
+   * Tax the tenant kept back, per invoice. Not part of the payment amount --
+   * that money never arrived, it went to the BIR for us -- so it settles the
+   * invoice without ever counting against what is unapplied.
+   */
+  const [withheld, setWithheld] = useState<Record<string, string>>({});
 
   const isCheque = mode === "check";
   /*
@@ -96,6 +110,14 @@ export function RecordPaymentForm({
   const invoices = useMemo(
     () => openInvoices.filter((invoice) => invoice.tenant_id === tenantId),
     [openInvoices, tenantId],
+  );
+
+  const chosenTenant = tenants.find((row) => row.id === tenantId);
+  const tenantWithholds = chosenTenant?.withholds_tax ?? false;
+  const tenantIsGovernment = chosenTenant?.is_government ?? false;
+
+  const totalWithheld = round2(
+    Object.values(withheld).reduce((sum, value) => sum + (Number(value) || 0), 0),
   );
 
   const totalApplied = round2(
@@ -140,14 +162,42 @@ export function RecordPaymentForm({
           .reduce((sum, [, value]) => sum + (Number(value) || 0), 0),
       );
       const stillUnapplied = round2((Number(amount) || 0) - alreadyApplied);
+      /*
+       * A withholding tenant settles the bill partly in cash and partly by
+       * paying our tax, so the cash to attach is the balance less what they
+       * kept back.
+       */
+      const keptBack = tenantWithholds
+        ? Math.min(
+            round2(invoice.suggestedTax + invoice.suggestedVat),
+            invoice.balance,
+          )
+        : 0;
+      const owing = round2(invoice.balance - keptBack);
       // With no amount entered yet, attach the full balance and let the total
       // drive the amount instead.
-      const take =
-        stillUnapplied > 0
-          ? Math.min(stillUnapplied, invoice.balance)
-          : invoice.balance;
+      const take = stillUnapplied > 0 ? Math.min(stillUnapplied, owing) : owing;
 
       return { ...current, [invoice.id]: take.toFixed(2) };
+    });
+
+    // The withheld portion follows the attachment, and is editable after.
+    setWithheld((current) => {
+      const next = { ...current };
+      if (!checked || !tenantWithholds) {
+        delete next[invoice.id];
+        return next;
+      }
+      const keptBack = Math.min(
+        round2(invoice.suggestedTax + invoice.suggestedVat),
+        invoice.balance,
+      );
+      if (keptBack <= 0) {
+        delete next[invoice.id];
+        return next;
+      }
+      next[invoice.id] = keptBack.toFixed(2);
+      return next;
     });
   }
 
@@ -423,6 +473,18 @@ export function RecordPaymentForm({
             </div>
           </div>
 
+          {tenantWithholds ? (
+            <p className="text-xs muted mb-2">
+              This tenant withholds tax from their rent, so attaching an
+              invoice fills the cash and the withheld tax separately. The two
+              together settle the bill in full
+              {tenantIsGovernment
+                ? " — as a government tenant they withhold VAT as well."
+                : "."}{" "}
+              Change either figure if what they actually withheld differs.
+            </p>
+          ) : null}
+
           {invoices.length > 0 ? (
             <div className="table-scroll">
               <table className="table">
@@ -435,15 +497,27 @@ export function RecordPaymentForm({
                     <th className="text-right" style={{ width: "10rem" }}>
                       Amount applied
                     </th>
+                    <th className="text-right" style={{ width: "9rem" }}>
+                      Tax withheld
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
                   {invoices.map((invoice) => {
                     const value = applied[invoice.id] ?? "";
-                    const attached = Number(value) > 0;
+                    // Cash and withheld tax together settle the bill, so it
+                    // is the pair that decides whether this is a part
+                    // payment and the pair that must not exceed the balance.
+                    // Reading the cash alone would call a withholding
+                    // tenant's payment in full a part payment.
+                    const settling = round2(
+                      (Number(value) || 0) + (Number(withheld[invoice.id]) || 0),
+                    );
+                    const attached = settling > 0;
                     const isPartial =
-                      attached && Number(value) < invoice.balance;
+                      attached && settling < invoice.balance - 0.005;
                     const overBalance = Number(value) > invoice.balance;
+                    const settlesOver = settling > invoice.balance + 0.005;
                     return (
                       <tr key={invoice.id}>
                         <td>
@@ -501,6 +575,35 @@ export function RecordPaymentForm({
                             </p>
                           ) : null}
                         </td>
+                        <td className="text-right">
+                          <input
+                            name={`wht:${invoice.id}`}
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            className="input tabular-nums"
+                            style={{ textAlign: "right" }}
+                            placeholder="0.00"
+                            value={withheld[invoice.id] ?? ""}
+                            onChange={(event) => {
+                              // currentTarget is null by the time the
+                              // updater runs, so take the value now.
+                              const next = event.currentTarget.value;
+                              setWithheld((current) => ({
+                                ...current,
+                                [invoice.id]: next,
+                              }));
+                            }}
+                          />
+                          {settlesOver ? (
+                            <p
+                              className="text-xs"
+                              style={{ color: "var(--danger)" }}
+                            >
+                              cash + withheld is more than the balance
+                            </p>
+                          ) : null}
+                        </td>
                       </tr>
                     );
                   })}
@@ -516,6 +619,9 @@ export function RecordPaymentForm({
                       style={{ color: unapplied < 0 ? "var(--danger)" : undefined }}
                     >
                       {money(unapplied)}
+                    </td>
+                    <td className="text-right tabular-nums font-semibold">
+                      {money(totalWithheld)}
                     </td>
                   </tr>
                 </tbody>

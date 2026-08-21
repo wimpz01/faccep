@@ -5,6 +5,7 @@ import { Card, PageHeader } from "@/components/ui";
 import { requirePermission } from "@/lib/auth";
 import { MODULE, can } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
+import { supplierRateMap, type TaxRate } from "@/lib/tax";
 
 import {
   createVendor,
@@ -52,6 +53,7 @@ export default async function VendorsPage({
     { data: openBills },
     { data: terms },
     { data: openRequests },
+    { data: rateRows },
   ] = await Promise.all([
     supabase
       .from("vendors")
@@ -82,7 +84,16 @@ export default async function VendorsPage({
       .eq("entity_table", "vendors")
       .eq("action", "approve")
       .eq("status", "pending"),
+    // The rates in force, so a label never claims a percentage that has been
+    // edited since this code was written.
+    supabase
+      .from("tax_rates")
+      .select("*")
+      .eq("company_id", companyId)
+      .returns<TaxRate[]>(),
   ]);
+
+  const withholdingRates = supplierRateMap(rateRows ?? []);
 
   // A pending supplier with nothing in the queue is stranded: unusable because
   // it is pending, unapprovable because there is nothing to decide.
@@ -136,7 +147,11 @@ export default async function VendorsPage({
       {adding ? (
         <div className="mb-6">
           <Card title="Add a supplier">
-            <VendorForm action={createVendor} terms={terms ?? []} />
+            <VendorForm
+              action={createVendor}
+              terms={terms ?? []}
+              withholdingRates={withholdingRates}
+            />
           </Card>
         </div>
       ) : null}
@@ -155,7 +170,7 @@ export default async function VendorsPage({
           termsName: vendor.payment_terms?.name ?? null,
           termsDays: vendor.payment_terms?.days ?? null,
           is_vatable: vendor.is_vatable,
-          withholdingLabel: withholdingLabel(vendor.withholding),
+          withholdingLabel: withholdingLabel(vendor.withholding, withholdingRates),
           status: vendor.status,
           owed: owing.get(vendor.id) ?? 0,
           queued: queued.has(vendor.id),

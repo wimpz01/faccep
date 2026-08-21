@@ -3245,6 +3245,294 @@ async function main() {
     `),
     "blocked",
   );
+
+  // -------------------------------------------------------------------------
+  // Tax rates as a setting, and tax withheld by tenants
+  // -------------------------------------------------------------------------
+
+  console.log("\nTax settings");
+
+  check(
+    "a new company is seeded with its BIR rates",
+    (
+      await db.query(`
+        select count(*)::int as n from public.tax_rates
+         where company_id = ${lit(alpha)};
+      `)
+    )[0].n,
+    4,
+  );
+
+  check(
+    "supplier withholding reads the table, not a constant",
+    Number(
+      (
+        await db.query(
+          `select public.withholding_rate(${lit(alpha)}, 'goods') as r;`,
+        )
+      )[0].r,
+    ),
+    1,
+  );
+
+  // The whole point of the table: editing the rate moves what the system uses.
+  await db.query(`
+    update public.tax_rates set rate = 1.5
+     where company_id = ${lit(alpha)}
+       and kind = 'supplier_withholding' and code = 'goods';
+  `);
+  check(
+    "editing the rate changes what withholding_rate returns",
+    Number(
+      (
+        await db.query(
+          `select public.withholding_rate(${lit(alpha)}, 'goods') as r;`,
+        )
+      )[0].r,
+    ),
+    1.5,
+  );
+  await db.query(`
+    update public.tax_rates set rate = 1.0
+     where company_id = ${lit(alpha)}
+       and kind = 'supplier_withholding' and code = 'goods';
+  `);
+
+  check(
+    "a rate switched off falls back to the statutory default, never to zero",
+    Number(
+      (
+        await db.query(`
+          update public.tax_rates set is_active = false
+           where company_id = ${lit(alpha)}
+             and kind = 'supplier_withholding' and code = 'services';
+          select public.withholding_rate(${lit(alpha)}, 'services') as r;
+        `)
+      )[0].r,
+    ),
+    2,
+  );
+  await db.query(`
+    update public.tax_rates set is_active = true
+     where company_id = ${lit(alpha)}
+       and kind = 'supplier_withholding' and code = 'services';
+  `);
+
+  // A withholding tenant with one 10,000 VAT-inclusive bill.
+  const whtTenant = (
+    await db.query(`
+      insert into public.tenants (company_id, company_name, is_vatable, withholds_tax)
+      values (${lit(alpha)}, ${lit(`${TEST_TAG}-wht`)}, true, true)
+      returning id;
+    `)
+  )[0].id;
+
+  /*
+   * Built from lines, and deliberately mixed: a VATable rent quoted
+   * inclusive, plus a reimbursement outside VAT. The tenant withholds on the
+   * first and not the second, which is the whole point of vatable_net.
+   */
+  const whtInvoice = (
+    await db.query(`
+      insert into public.invoices (
+        company_id, tenant_id, invoice_no, status, invoice_date, due_date,
+        period_start, period_end, is_vatable, vat_rate)
+      values (
+        ${lit(alpha)}, ${lit(whtTenant)}, ${lit(`${TEST_TAG}-WHT1`)},
+        'draft', current_date, current_date, current_date, current_date,
+        true, 12)
+      returning id;
+    `)
+  )[0].id;
+
+  await db.query(`
+    insert into public.invoice_lines
+      (invoice_id, line_kind, description, quantity, unit_price, amount,
+       tax_treatment, vat_mode)
+    values (${lit(whtInvoice)}, 'rent', 'Rent', 1, 10000, 10000, 'vatable', 'inclusive'),
+           (${lit(whtInvoice)}, 'other', 'Reimbursement', 1, 2000, 2000, 'no_tax', null);
+  `);
+
+  const whtTotals = (
+    await db.query(`
+      select subtotal, vat_amount, vatable_net, total
+        from public.invoices where id = ${lit(whtInvoice)};
+    `)
+  )[0];
+  check("the VATable line is totalled apart from the exempt one",
+    Number(whtTotals.vatable_net), 8928.57);
+  check("while the invoice subtotal still carries both",
+    Number(whtTotals.subtotal), 10928.57);
+  check("and the bill comes to the two together",
+    Number(whtTotals.total), 12000);
+
+  await db.query(
+    `update public.invoices set status = 'released' where id = ${lit(whtInvoice)};`,
+  );
+
+  const suggested = (
+    await db.query(
+      `select * from public.suggested_tenant_withholding(${lit(whtInvoice)});`,
+    )
+  )[0];
+  check(
+    "5% is taken on the VATable lines net of VAT, not on the gross",
+    Number(suggested.tax_withheld),
+    446.43,
+  );
+  // 5% of the whole subtotal would be 546.43 -- withholding on a charge
+  // that is outside VAT, which is money that then has to be reclaimed.
+  check(
+    "a charge outside VAT is not withheld on",
+    Number(suggested.tax_withheld) < 546,
+    true,
+  );
+  check(
+    "a private tenant is not offered the government VAT withholding",
+    Number(suggested.vat_withheld),
+    0,
+  );
+
+  const whtPayment = (
+    await db.query(`
+      insert into public.payments (
+        company_id, tenant_id, payment_no, payment_kind, payment_mode,
+        payment_date, amount, status)
+      values (${lit(alpha)}, ${lit(whtTenant)}, ${lit(`${TEST_TAG}-WHTPAY`)},
+              'payment', 'bank_transfer', current_date, 11553.57, 'posted')
+      returning id;
+    `)
+  )[0].id;
+
+  const whtApplication = (
+    await db.query(`
+      insert into public.payment_applications (
+        payment_id, invoice_id, amount, tax_withheld)
+      values (${lit(whtPayment)}, ${lit(whtInvoice)}, 11553.57, 446.43)
+      returning id;
+    `)
+  )[0].id;
+
+  const settled = (
+    await db.query(`
+      select status, amount_paid from public.invoices
+       where id = ${lit(whtInvoice)};
+    `)
+  )[0];
+  check(
+    "cash plus withheld tax settles the invoice in full",
+    settled.status,
+    "paid",
+  );
+  check(
+    "and the invoice shows the whole amount discharged",
+    Number(settled.amount_paid),
+    12000,
+  );
+
+  const whtJournal = (
+    await db.query(`
+      select coalesce(sum(jl.debit), 0)::numeric as dr,
+             coalesce(sum(jl.credit), 0)::numeric as cr
+        from public.journal_lines jl
+        join public.journal_entries je on je.id = jl.entry_id
+       where je.source_table = 'payment_applications'
+         and je.source_id = ${lit(whtApplication)};
+    `)
+  )[0];
+  check("the posting balances", Number(whtJournal.dr), Number(whtJournal.cr));
+  check("and it carries the whole invoice", Number(whtJournal.cr), 12000);
+
+  check(
+    "the withheld tax is debited to Creditable Withholding Tax",
+    Number(
+      (
+        await db.query(`
+          select coalesce(sum(jl.debit - jl.credit), 0)::numeric as bal
+            from public.journal_lines jl
+            join public.journal_entries je on je.id = jl.entry_id
+            join public.chart_of_accounts a on a.id = jl.account_id
+           where je.source_id = ${lit(whtApplication)} and a.code = '1450';
+        `)
+      )[0].bal,
+    ),
+    446.43,
+  );
+
+  check(
+    "settling more than the invoice is worth is refused",
+    await expectFail(`
+      insert into public.payment_applications (payment_id, invoice_id, amount)
+      values (${lit(whtPayment)}, ${lit(whtInvoice)}, 1.00);
+    `),
+    "blocked",
+  );
+
+  check(
+    "taking the application off reopens the invoice",
+    (
+      await db.query(`
+        delete from public.payment_applications where id = ${lit(whtApplication)};
+        select status from public.invoices where id = ${lit(whtInvoice)};
+      `)
+    )[0].status,
+    "released",
+  );
+
+  check(
+    "a government tenant is offered the VAT withholding as well",
+    Number(
+      (
+        await db.query(`
+          update public.tenants set is_government = true
+           where id = ${lit(whtTenant)};
+          select vat_withheld
+            from public.suggested_tenant_withholding(${lit(whtInvoice)});
+        `)
+      )[0].vat_withheld,
+    ),
+    53.57,
+  );
+
+  check(
+    "a tenant cannot be government without withholding",
+    await expectFail(`
+      update public.tenants
+         set is_government = true, withholds_tax = false
+       where id = ${lit(whtTenant)};
+    `),
+    "blocked",
+  );
+
+  // Withholding is computed on the VATable inclusions, so a tenant without
+  // any cannot withhold. The supplier side has said the same since 0035.
+  check(
+    "a tenant who is not VAT-registered cannot withhold",
+    await expectFail(`
+      insert into public.tenants (company_id, company_name, is_vatable, withholds_tax)
+      values (${lit(alpha)}, ${lit(`${TEST_TAG}-nonvat`)}, false, true);
+    `),
+    "blocked",
+  );
+
+  check(
+    "and an existing one cannot be switched to withholding either",
+    await expectFail(`
+      update public.tenants set is_vatable = false
+       where id = ${lit(whtTenant)};
+    `),
+    "blocked",
+  );
+
+  check(
+    "a 2307 reference cannot be recorded where nothing was withheld",
+    await expectFail(`
+      insert into public.payment_applications (
+        payment_id, invoice_id, amount, form_2307_no)
+      values (${lit(whtPayment)}, ${lit(whtInvoice)}, 100.00, 'no-tax-here');
+    `),
+    "blocked",
+  );
 }
 
 async function cleanup() {

@@ -6,6 +6,7 @@ import { requirePermission } from "@/lib/auth";
 import { money } from "@/lib/format";
 import { MODULE, can } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
+import { suggestedWithholding, type TaxRate } from "@/lib/tax";
 
 import { recordPayment } from "./actions";
 import { RecordPaymentForm, type OpenInvoice } from "./payment-forms";
@@ -40,8 +41,12 @@ export default async function PaymentsPage({
   const canEdit = can(context.permissions, MODULE.payments, "edit");
 
   const supabase = await createClient();
-  const [{ data: payments }, { data: tenants }, { data: invoices }] =
-    await Promise.all([
+  const [
+    { data: payments },
+    { data: tenants },
+    { data: invoices },
+    { data: rateRows },
+  ] = await Promise.all([
       supabase
         .from("payments")
         .select(
@@ -53,28 +58,63 @@ export default async function PaymentsPage({
         .returns<PaymentRow[]>(),
       supabase
         .from("tenants")
-        .select("id, company_name")
+        .select("id, company_name, withholds_tax, is_government")
         .eq("company_id", companyId)
-        .order("company_name"),
+        .order("company_name")
+        .returns<
+          {
+            id: string;
+            company_name: string;
+            withholds_tax: boolean;
+            is_government: boolean;
+          }[]
+        >(),
       supabase
         .from("invoices")
-        .select("id, invoice_no, tenant_id, due_date, total, amount_paid, credited_amount")
+        .select(
+          "id, invoice_no, tenant_id, due_date, total, amount_paid, credited_amount, vatable_net, vat_amount",
+        )
         .eq("company_id", companyId)
         .in("status", ["released", "partially_paid"])
         .order("due_date"),
+      supabase
+        .from("tax_rates")
+        .select("*")
+        .eq("company_id", companyId)
+        .returns<TaxRate[]>(),
     ]);
 
+  const rates = rateRows ?? [];
+  const tenantById = new Map((tenants ?? []).map((row) => [row.id, row]));
+
   const openInvoices: OpenInvoice[] = (invoices ?? [])
-    .map((invoice) => ({
-      id: invoice.id,
-      invoice_no: invoice.invoice_no,
-      tenant_id: invoice.tenant_id,
-      due_date: invoice.due_date,
-      balance:
+    .map((invoice) => {
+      const balance =
         Number(invoice.total) -
         Number(invoice.amount_paid) -
-        Number(invoice.credited_amount),
-    }))
+        Number(invoice.credited_amount);
+      const tenant = tenantById.get(invoice.tenant_id);
+      const suggestion = suggestedWithholding({
+        vatableNet: Number(invoice.vatable_net),
+        vatAmount: Number(invoice.vat_amount),
+        withholds: tenant?.withholds_tax ?? false,
+        isGovernment: tenant?.is_government ?? false,
+        rates,
+      });
+      return {
+        id: invoice.id,
+        invoice_no: invoice.invoice_no,
+        tenant_id: invoice.tenant_id,
+        due_date: invoice.due_date,
+        balance,
+        // Never offer to withhold more than is left owing on the bill.
+        suggestedTax: Math.min(suggestion.tax, Math.max(balance, 0)),
+        suggestedVat: Math.min(
+          suggestion.vat,
+          Math.max(balance - Math.min(suggestion.tax, balance), 0),
+        ),
+      };
+    })
     .filter((invoice) => invoice.balance > 0);
 
   const rows = payments ?? [];

@@ -479,3 +479,135 @@ export async function setPeriodStatus(
         : `${period?.name ?? "Period"} reopened.`,
   };
 }
+
+/**
+ * Sets the VAT rate charged on invoices raised from now on.
+ *
+ * Deliberately forward-only. Every invoice stamps the rate it was billed at
+ * onto itself and its lines when it is raised, so an invoice already issued
+ * keeps the VAT it was issued with however often this changes. Nothing here
+ * recomputes history, and nothing should.
+ */
+export async function updateVatRate(
+  _prevState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  let companyId: string;
+  try {
+    const context = await assertPermission(MODULE.accountingTax, "edit");
+    companyId = context.activeCompany!.companyId;
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+
+  const parsed = z
+    .number()
+    .min(0, "A VAT rate cannot be negative.")
+    .max(100, "A VAT rate cannot be more than 100%.")
+    .safeParse(Number(formData.get("vat_rate")));
+
+  if (!parsed.success) {
+    return { error: parsed.error.issues[0]?.message ?? "Enter a valid rate." };
+  }
+
+  const supabase = await createClient();
+  const { data: before } = await supabase
+    .from("accounting_settings")
+    .select("vat_rate")
+    .eq("company_id", companyId)
+    .maybeSingle<{ vat_rate: string }>();
+
+  const { error } = await supabase
+    .from("accounting_settings")
+    .update({ vat_rate: parsed.data })
+    .eq("company_id", companyId);
+  if (error) return { error: error.message };
+
+  await logAudit({
+    action: "update",
+    moduleKey: MODULE.accountingTax,
+    entityTable: "accounting_settings",
+    entityId: companyId,
+    summary: `VAT rate set to ${parsed.data}%.`,
+    before: { vat_rate: before?.vat_rate ?? null },
+    after: { vat_rate: parsed.data },
+  });
+
+  revalidatePath("/accounting/taxes");
+  revalidatePath("/billing/invoices");
+  return { success: `VAT is now ${parsed.data}% on invoices raised from here.` };
+}
+
+/**
+ * Saves the withholding rates.
+ *
+ * These were constants in two places that had no way of staying equal; they
+ * are one editable set now. Like VAT, editing moves the next document only --
+ * a supplier bill stores the withholding it was computed with, and an
+ * application stores what the tenant actually withheld.
+ */
+export async function updateTaxRates(
+  _prevState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  let companyId: string;
+  try {
+    const context = await assertPermission(MODULE.accountingTax, "edit");
+    companyId = context.activeCompany!.companyId;
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+
+  const supabase = await createClient();
+  const { data: existing } = await supabase
+    .from("tax_rates")
+    .select("id, label, rate, is_active")
+    .eq("company_id", companyId)
+    .returns<{ id: string; label: string; rate: string; is_active: boolean }[]>();
+
+  const changes: string[] = [];
+
+  for (const row of existing ?? []) {
+    const raw = formData.get(`rate:${row.id}`);
+    // A row the form did not carry is left exactly as it is.
+    if (raw === null) continue;
+
+    const rate = Number(raw);
+    if (!Number.isFinite(rate) || rate < 0 || rate > 100) {
+      return { error: `${row.label} must be a percentage between 0 and 100.` };
+    }
+
+    const active = formData.get(`active:${row.id}`) !== null;
+    const rounded = Math.round(rate * 1000) / 1000;
+    if (rounded === Number(row.rate) && active === row.is_active) continue;
+
+    const { error } = await supabase
+      .from("tax_rates")
+      .update({ rate: rounded, is_active: active })
+      .eq("id", row.id)
+      .eq("company_id", companyId);
+    if (error) return { error: error.message };
+
+    changes.push(
+      `${row.label} ${row.rate}% → ${rounded}%${active === row.is_active ? "" : active ? " (in use)" : " (not in use)"}`,
+    );
+  }
+
+  if (changes.length === 0) {
+    return { success: "Nothing changed." };
+  }
+
+  await logAudit({
+    action: "update",
+    moduleKey: MODULE.accountingTax,
+    entityTable: "tax_rates",
+    entityId: companyId,
+    summary: `Withholding rates changed: ${changes.join("; ")}.`,
+    after: { changes },
+  });
+
+  revalidatePath("/accounting/taxes");
+  return {
+    success: `Saved. ${changes.length} rate${changes.length === 1 ? "" : "s"} changed.`,
+  };
+}

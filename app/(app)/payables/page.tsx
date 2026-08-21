@@ -14,6 +14,7 @@ import { round2 } from "@/lib/billing";
 import { formatDate, money } from "@/lib/format";
 import { MODULE, can } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
+import { supplierRateMap, type TaxRate } from "@/lib/tax";
 
 import {
   cancelVoucher,
@@ -140,6 +141,7 @@ export default async function PayablesPage({
     { data: pendingVoucherApprovals },
     { data: stockItems },
     { data: nonStockItems },
+    { data: rateRows },
   ] = await Promise.all([
     supabase
       .from("supplier_invoices")
@@ -198,7 +200,16 @@ export default async function PayablesPage({
       .eq("company_id", companyId)
       .eq("is_active", true)
       .order("name"),
+    // The withholding rates in force, so the voucher preview agrees with what
+    // the ledger will actually post.
+    supabase
+      .from("tax_rates")
+      .select("*")
+      .eq("company_id", companyId)
+      .returns<TaxRate[]>(),
   ]);
+
+  const withholdingRates = supplierRateMap(rateRows ?? []);
 
   const awaitingApproval = new Set(
     (pendingVoucherApprovals ?? []).map((row) => row.entity_id as string),
@@ -617,6 +628,7 @@ export default async function PayablesPage({
               vendors={vendors ?? []}
               bills={open}
               reversible={reversible}
+              withholdingRates={withholdingRates}
             />
           </Card>
         </div>

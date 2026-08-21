@@ -19,6 +19,8 @@ export type TenantValues = {
   email?: string | null;
   tin?: string | null;
   is_vatable?: boolean;
+  withholds_tax?: boolean;
+  is_government?: boolean;
   notes?: string | null;
 };
 
@@ -58,6 +60,19 @@ export function TenantForm({
 }) {
   const [state, formAction] = useActionState<ActionState, FormData>(action, {});
   const key = tenant?.id ?? "new";
+
+  /*
+   * These three move together, so they are held rather than left to the form.
+   * Withholding is computed on a tenant's VATable inclusions, which a non-VAT
+   * tenant does not have, and a government tenant is a withholding one by
+   * definition. The database refuses both combinations; holding them here
+   * means the boxes never offer a choice that would be refused.
+   */
+  const [isVatable, setIsVatable] = useState(tenant?.is_vatable ?? false);
+  const [withholds, setWithholds] = useState(tenant?.withholds_tax ?? false);
+  const [isGovernment, setIsGovernment] = useState(
+    tenant?.is_government ?? false,
+  );
 
   return (
     <form action={formAction} className="grid gap-4 sm:grid-cols-2">
@@ -144,11 +159,70 @@ export function TenantForm({
           <input
             type="checkbox"
             name="is_vatable"
-            defaultChecked={tenant?.is_vatable ?? false}
+            checked={isVatable}
+            onChange={(event) => {
+              const on = event.currentTarget.checked;
+              setIsVatable(on);
+              // Withholding is computed on the VATable inclusions, so a
+              // tenant who stops being VAT-registered stops withholding.
+              if (!on) {
+                setWithholds(false);
+                setIsGovernment(false);
+              }
+            }}
             className="h-4 w-4 accent-[var(--color-brand-600)]"
           />
           VATable — VAT is added to this tenant&apos;s invoices
         </label>
+      </div>
+
+      {/* Whether this tenant keeps tax back from their rent. It decides only
+          whether a figure is offered when a payment is applied; the amount
+          recorded is always what they actually withheld.
+
+          Offered only to a VAT-registered tenant. The base is their VATable
+          inclusions, so a non-VAT tenant has nothing to withhold on, and the
+          database refuses the combination outright. */}
+      <div className="sm:col-span-2 flex flex-col gap-2">
+        <label
+          className="flex items-center gap-2 text-sm"
+          style={{ opacity: isVatable ? 1 : 0.5 }}
+        >
+          <input
+            type="checkbox"
+            name="withholds_tax"
+            checked={withholds}
+            disabled={!isVatable}
+            onChange={(event) => {
+              const on = event.currentTarget.checked;
+              setWithholds(on);
+              if (!on) setIsGovernment(false);
+            }}
+            className="h-4 w-4 accent-[var(--color-brand-600)]"
+          />
+          Withholds tax — this tenant keeps back creditable tax from their rent
+          and issues us BIR form 2307
+        </label>
+        <label
+          className="flex items-center gap-2 text-sm"
+          style={{ opacity: withholds ? 1 : 0.5 }}
+        >
+          <input
+            type="checkbox"
+            name="is_government"
+            checked={isGovernment}
+            disabled={!withholds}
+            onChange={(event) => setIsGovernment(event.currentTarget.checked)}
+            className="h-4 w-4 accent-[var(--color-brand-600)]"
+          />
+          Government tenant — withholds VAT as well as income tax
+        </label>
+        {!isVatable ? (
+          <p className="text-xs muted">
+            A tenant who is not VAT-registered has no VATable inclusions to
+            withhold on, so withholding does not apply to them.
+          </p>
+        ) : null}
       </div>
 
       <div className="sm:col-span-2">

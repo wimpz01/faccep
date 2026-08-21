@@ -8,7 +8,10 @@ import { FormError } from "@/components/ui";
 import { round2 } from "@/lib/billing";
 import { formatDate, money } from "@/lib/format";
 
-import { withholdingRate } from "@/app/(app)/purchasing/constants";
+import {
+  withholdingRate,
+  type WithholdingRates,
+} from "@/app/(app)/purchasing/constants";
 
 import type { ActionState } from "./actions";
 import {
@@ -1078,11 +1081,14 @@ export function VoucherForm({
   vendors,
   bills,
   reversible,
+  withholdingRates,
 }: {
   action: (state: ActionState, formData: FormData) => Promise<ActionState>;
   vendors: VendorOption[];
   bills: OpenBill[];
   reversible: ReversibleVoucher[];
+  /** From tax settings, so the preview matches what the ledger will post. */
+  withholdingRates: WithholdingRates;
 }) {
   const [state, formAction] = useActionState<ActionState, FormData>(action, {});
   const [kind, setKind] = useState<string>("payment");
@@ -1128,7 +1134,7 @@ export function VoucherForm({
   // being paid, and only on bills that were not already withheld from.
   const vendor = vendors.find((row) => row.id === vendorId);
   const rate = vendor?.is_vatable
-    ? withholdingRate(vendor.withholding ?? "none")
+    ? withholdingRate(vendor.withholding ?? "none", withholdingRates)
     : 0;
   const withholdable = round2(
     vendorBills

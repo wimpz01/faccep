@@ -8,6 +8,7 @@ import { requirePermission } from "@/lib/auth";
 import { formatDate, money } from "@/lib/format";
 import { MODULE, can } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
+import { suggestedWithholding, type TaxRate } from "@/lib/tax";
 
 import { applyPrepayment, requestPaymentVoid, unapplyPayment } from "../actions";
 import { ApplyCreditForm, type OpenBill } from "../apply-credit-form";
@@ -32,6 +33,9 @@ type PaymentDetail = {
   payment_applications: {
     id: string;
     amount: string;
+    tax_withheld: string;
+    vat_withheld: string;
+    form_2307_no: string | null;
     invoices: { id: string; invoice_no: string; due_date: string } | null;
   }[];
 };
@@ -52,7 +56,7 @@ export default async function PaymentDetailPage({
   const { data: payment } = await supabase
     .from("payments")
     .select(
-      "*, tenants(id, company_name), payment_applications(id, amount, invoices(id, invoice_no, due_date))",
+      "*, tenants(id, company_name), payment_applications(id, amount, tax_withheld, vat_withheld, form_2307_no, invoices(id, invoice_no, due_date))",
     )
     .eq("id", id)
     .maybeSingle<PaymentDetail>();
@@ -85,34 +89,74 @@ export default async function PaymentDetailPage({
     payment.payment_kind !== "refund" &&
     unapplied > 0;
 
-  const { data: billRows } = canApply
-    ? await supabase
-        .from("invoices")
-        .select("id, invoice_no, due_date, total, amount_paid, credited_amount")
-        .eq("company_id", companyId)
-        .eq("tenant_id", payment.tenants?.id ?? "")
-        .in("status", ["released", "partially_paid"])
-        .order("due_date")
-        .returns<
-          {
-            id: string;
-            invoice_no: string;
-            due_date: string;
-            total: string;
-            amount_paid: string;
-            credited_amount: string;
-          }[]
-        >()
-    : { data: null };
+  /*
+   * The tenant's withholding habit and the company's rates, so the form can
+   * offer a figure. Loaded only when the form is shown.
+   */
+  const [{ data: billRows }, { data: tenantRow }, { data: rateRows }] = canApply
+    ? await Promise.all([
+        supabase
+          .from("invoices")
+          .select(
+            "id, invoice_no, due_date, total, amount_paid, credited_amount, vatable_net, vat_amount",
+          )
+          .eq("company_id", companyId)
+          .eq("tenant_id", payment.tenants?.id ?? "")
+          .in("status", ["released", "partially_paid"])
+          .order("due_date")
+          .returns<
+            {
+              id: string;
+              invoice_no: string;
+              due_date: string;
+              total: string;
+              amount_paid: string;
+              credited_amount: string;
+              vatable_net: string;
+              vat_amount: string;
+            }[]
+          >(),
+        supabase
+          .from("tenants")
+          .select("withholds_tax, is_government")
+          .eq("id", payment.tenants?.id ?? "")
+          .maybeSingle<{ withholds_tax: boolean; is_government: boolean }>(),
+        supabase
+          .from("tax_rates")
+          .select("*")
+          .eq("company_id", companyId)
+          .returns<TaxRate[]>(),
+      ])
+    : [{ data: null }, { data: null }, { data: null }];
+
+  const withholds = tenantRow?.withholds_tax ?? false;
+  const isGovernment = tenantRow?.is_government ?? false;
+  const rates = rateRows ?? [];
 
   const openBills: OpenBill[] = (billRows ?? [])
-    .map((row) => ({
-      id: row.id,
-      invoice_no: row.invoice_no,
-      due_date: row.due_date,
-      balance:
-        Number(row.total) - Number(row.amount_paid) - Number(row.credited_amount),
-    }))
+    .map((row) => {
+      const balance =
+        Number(row.total) - Number(row.amount_paid) - Number(row.credited_amount);
+      const suggestion = suggestedWithholding({
+        vatableNet: Number(row.vatable_net),
+        vatAmount: Number(row.vat_amount),
+        withholds,
+        isGovernment,
+        rates,
+      });
+      return {
+        id: row.id,
+        invoice_no: row.invoice_no,
+        due_date: row.due_date,
+        balance,
+        // Never offer to withhold more than is left owing on the bill.
+        suggestedTax: Math.min(suggestion.tax, Math.max(balance, 0)),
+        suggestedVat: Math.min(
+          suggestion.vat,
+          Math.max(balance - Math.min(suggestion.tax, balance), 0),
+        ),
+      };
+    })
     .filter((row) => row.balance > 0);
 
   return (
@@ -231,6 +275,8 @@ export default async function PaymentDetailPage({
               paymentId={payment.id}
               unapplied={unapplied}
               invoices={openBills}
+              tenantWithholds={withholds}
+              tenantIsGovernment={isGovernment}
             />
           </Card>
         </div>
@@ -246,6 +292,7 @@ export default async function PaymentDetailPage({
                     <th>Invoice</th>
                     <th>Due</th>
                     <th className="text-right">Applied</th>
+                    <th className="text-right">Tax withheld</th>
                     {canUnapply ? <th /> : null}
                   </tr>
                 </thead>
@@ -266,6 +313,24 @@ export default async function PaymentDetailPage({
                       </td>
                       <td className="text-xs">{formatDate(row.invoices?.due_date)}</td>
                       <td className="text-right tabular-nums">{money(row.amount)}</td>
+                      <td className="text-right tabular-nums">
+                        {/* Withheld tax settles the invoice without any cash
+                            arriving, so it is shown apart from what was paid. */}
+                        {Number(row.tax_withheld) + Number(row.vat_withheld) > 0 ? (
+                          <>
+                            {money(
+                              Number(row.tax_withheld) + Number(row.vat_withheld),
+                            )}
+                            {row.form_2307_no ? (
+                              <span className="block text-xs muted">
+                                2307 {row.form_2307_no}
+                              </span>
+                            ) : null}
+                          </>
+                        ) : (
+                          <span className="muted">—</span>
+                        )}
+                      </td>
                       {canUnapply ? (
                         <td className="text-right">
                           {/* Removing it reverses the posting, so the credit

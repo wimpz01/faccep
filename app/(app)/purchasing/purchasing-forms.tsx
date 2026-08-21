@@ -9,7 +9,7 @@ import { FormError } from "@/components/ui";
 import { money } from "@/lib/format";
 
 import type { ActionState } from "./actions";
-import { WITHHOLDING_KINDS } from "./constants";
+import { WITHHOLDING_KINDS, withholdingLabel, type WithholdingRates } from "./constants";
 
 export type VendorOption = { id: string; name: string };
 export type ItemOption = {
@@ -186,9 +186,12 @@ export type PaymentTermOption = { id: string; name: string; days: number };
 export function VendorForm({
   action,
   terms,
+  withholdingRates,
 }: {
   action: (state: ActionState, formData: FormData) => Promise<ActionState>;
   terms: PaymentTermOption[];
+  /** Read from tax settings, so the labels show the rate actually in force. */
+  withholdingRates: WithholdingRates;
 }) {
   const [state, formAction] = useActionState<ActionState, FormData>(action, {});
   const [isVatable, setIsVatable] = useState(false);
@@ -305,7 +308,7 @@ export function VendorForm({
             >
               {WITHHOLDING_KINDS.map((kind) => (
                 <option key={kind.value} value={kind.value}>
-                  {kind.label}
+                  {withholdingLabel(kind.value, withholdingRates)}
                 </option>
               ))}
             </select>

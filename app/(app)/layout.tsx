@@ -193,6 +193,9 @@ export default async function AppLayout({
   if (can(permissions, MODULE.accountingPeriods, "view")) {
     accounting.push({ href: "/accounting/periods", label: "Periods" });
   }
+  if (can(permissions, MODULE.accountingTax, "view")) {
+    accounting.push({ href: "/accounting/taxes", label: "Tax settings" });
+  }
   if (can(permissions, MODULE.reportsFinancials, "view")) {
     accounting.push({ href: "/accounting/reports", label: "Financial statements" });
   }

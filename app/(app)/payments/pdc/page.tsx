@@ -84,7 +84,7 @@ export default async function PdcPage({
       .returns<PdcRow[]>(),
       supabase
         .from("tenants")
-        .select("id, company_name")
+        .select("id, company_name, withholds_tax, is_government")
         .eq("company_id", companyId)
         .order("company_name"),
       supabase

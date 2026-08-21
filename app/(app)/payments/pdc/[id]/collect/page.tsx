@@ -7,6 +7,7 @@ import { requirePermission } from "@/lib/auth";
 import { formatDate, money } from "@/lib/format";
 import { MODULE } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
+import { suggestedWithholding, type TaxRate } from "@/lib/tax";
 
 import { postChequeCollection } from "../../../actions";
 import type { OpenInvoice } from "../../../payment-forms";
@@ -37,6 +38,8 @@ type InvoiceRow = {
   total: string;
   amount_paid: string;
   credited_amount: string;
+  vatable_net: string;
+  vat_amount: string;
 };
 
 export default async function CollectChequePage({
@@ -60,26 +63,60 @@ export default async function CollectChequePage({
 
   if (!cheque || cheque.company_id !== companyId) notFound();
 
-  const { data: invoiceRows } = await supabase
-    .from("invoices")
-    .select("id, invoice_no, tenant_id, due_date, total, amount_paid, credited_amount")
-    .eq("company_id", companyId)
-    .eq("tenant_id", cheque.tenant_id)
-    .in("status", ["released", "partially_paid"])
-    .order("due_date")
-    .returns<InvoiceRow[]>();
+  const [{ data: invoiceRows }, { data: tenantRow }, { data: rateRows }] =
+    await Promise.all([
+      supabase
+        .from("invoices")
+        .select(
+          "id, invoice_no, tenant_id, due_date, total, amount_paid, credited_amount, vatable_net, vat_amount",
+        )
+        .eq("company_id", companyId)
+        .eq("tenant_id", cheque.tenant_id)
+        .in("status", ["released", "partially_paid"])
+        .order("due_date")
+        .returns<InvoiceRow[]>(),
+      supabase
+        .from("tenants")
+        .select("withholds_tax, is_government")
+        .eq("id", cheque.tenant_id)
+        .maybeSingle<{ withholds_tax: boolean; is_government: boolean }>(),
+      supabase
+        .from("tax_rates")
+        .select("*")
+        .eq("company_id", companyId)
+        .returns<TaxRate[]>(),
+    ]);
+
+  const withholds = tenantRow?.withholds_tax ?? false;
+  const isGovernment = tenantRow?.is_government ?? false;
+  const rates = rateRows ?? [];
 
   const invoices: OpenInvoice[] = (invoiceRows ?? [])
-    .map((invoice) => ({
-      id: invoice.id,
-      invoice_no: invoice.invoice_no,
-      tenant_id: invoice.tenant_id,
-      due_date: invoice.due_date,
-      balance:
+    .map((invoice) => {
+      const balance =
         Number(invoice.total) -
         Number(invoice.amount_paid) -
-        Number(invoice.credited_amount),
-    }))
+        Number(invoice.credited_amount);
+      const suggestion = suggestedWithholding({
+        vatableNet: Number(invoice.vatable_net),
+        vatAmount: Number(invoice.vat_amount),
+        withholds,
+        isGovernment,
+        rates,
+      });
+      return {
+        id: invoice.id,
+        invoice_no: invoice.invoice_no,
+        tenant_id: invoice.tenant_id,
+        due_date: invoice.due_date,
+        balance,
+        suggestedTax: Math.min(suggestion.tax, Math.max(balance, 0)),
+        suggestedVat: Math.min(
+          suggestion.vat,
+          Math.max(balance - Math.min(suggestion.tax, balance), 0),
+        ),
+      };
+    })
     .filter((invoice) => invoice.balance > 0);
 
   const alreadyCollected = Boolean(cheque.payment_id);

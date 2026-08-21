@@ -120,14 +120,32 @@ export async function recordPayment(
     redirect("/payments/pdc");
   }
 
-  const applications: { invoice_id: string; amount: number }[] = [];
+  /*
+   * A withholding tenant settles the invoice partly in cash and partly by
+   * paying our tax for us, so what they kept back arrives as `wht:<invoice>`
+   * beside the cash. It is not part of the payment amount -- that money never
+   * reached us -- so it is never counted against what was received.
+   */
+  const applications: {
+    invoice_id: string;
+    amount: number;
+    tax_withheld: number;
+  }[] = [];
   for (const [key, raw] of formData.entries()) {
     if (!key.startsWith("apply:")) continue;
+    const invoiceId = key.slice("apply:".length);
     const value = String(raw).trim();
-    if (value === "" || Number(value) <= 0) continue;
+    const amount = value === "" ? 0 : round2(Number(value));
+    const rawWithheld = String(formData.get("wht:" + invoiceId) ?? "").trim();
+    const withheld = rawWithheld === "" ? 0 : round2(Number(rawWithheld));
+    if (amount <= 0 && withheld <= 0) continue;
+    if (amount < 0 || withheld < 0) {
+      return { error: "An amount cannot be negative." };
+    }
     applications.push({
-      invoice_id: key.slice("apply:".length),
-      amount: round2(Number(value)),
+      invoice_id: invoiceId,
+      amount,
+      tax_withheld: withheld,
     });
   }
 
@@ -679,14 +697,44 @@ export async function applyPrepayment(
   );
   const unapplied = round2(Number(payment.amount) - alreadyApplied);
 
-  const rows: { invoice_id: string; amount: number }[] = [];
+  /*
+   * Tax the tenant withheld rides alongside the cash on the same invoice. It
+   * is not part of the payment -- the money never arrived, it went to the BIR
+   * on our behalf -- so it is read separately and never counted against what
+   * is unapplied.
+   */
+  const decimal = (field: string) => {
+    const value = String(formData.get(field) ?? "").trim();
+    return value === "" ? 0 : round2(Number(value));
+  };
+
+  const rows: {
+    invoice_id: string;
+    amount: number;
+    tax_withheld: number;
+    vat_withheld: number;
+    form_2307_no: string | null;
+  }[] = [];
+
   for (const [field, raw] of formData.entries()) {
     if (!field.startsWith("apply:")) continue;
+    const invoiceId = field.slice("apply:".length);
     const value = String(raw).trim();
-    if (value === "" || Number(value) <= 0) continue;
+    const amount = value === "" ? 0 : round2(Number(value));
+    const taxWithheld = decimal(`wht:${invoiceId}`);
+    const vatWithheld = decimal(`vat:${invoiceId}`);
+    // A line that settles nothing at all is simply an untouched row.
+    if (amount <= 0 && taxWithheld <= 0 && vatWithheld <= 0) continue;
+    if (amount < 0 || taxWithheld < 0 || vatWithheld < 0) {
+      return { error: "An amount cannot be negative." };
+    }
+    const form = String(formData.get(`form2307:${invoiceId}`) ?? "").trim();
     rows.push({
-      invoice_id: field.slice("apply:".length),
-      amount: round2(Number(value)),
+      invoice_id: invoiceId,
+      amount,
+      tax_withheld: taxWithheld,
+      vat_withheld: vatWithheld,
+      form_2307_no: form === "" ? null : form,
     });
   }
 
@@ -701,6 +749,10 @@ export async function applyPrepayment(
     };
   }
 
+  const withheld = round2(
+    rows.reduce((sum, row) => sum + row.tax_withheld + row.vat_withheld, 0),
+  );
+
   const { error } = await supabase
     .from("payment_applications")
     .insert(rows.map((row) => ({ payment_id: paymentId, ...row })));
@@ -711,7 +763,9 @@ export async function applyPrepayment(
     moduleKey: MODULE.payments,
     entityTable: "payments",
     entityId: paymentId,
-    summary: `Applied ${total.toFixed(2)} of ${payment.payment_no} to ${rows.length} invoice(s).`,
+    summary:
+      `Applied ${total.toFixed(2)} of ${payment.payment_no} to ${rows.length} invoice(s)` +
+      (withheld > 0 ? `, with ${withheld.toFixed(2)} tax withheld.` : "."),
     after: { applications: rows },
   });
 
@@ -719,7 +773,11 @@ export async function applyPrepayment(
   revalidatePath("/payments");
   revalidatePath("/billing/invoices");
   return {
-    success: `Applied ${total.toFixed(2)} to ${rows.length} invoice${rows.length === 1 ? "" : "s"}.`,
+    success:
+      `Applied ${total.toFixed(2)} to ${rows.length} invoice${rows.length === 1 ? "" : "s"}` +
+      (withheld > 0
+        ? `, settling a further ${withheld.toFixed(2)} withheld as tax.`
+        : "."),
   };
 }
 

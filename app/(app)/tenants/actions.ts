@@ -26,6 +26,8 @@ const tenantSchema = z.object({
     .or(z.literal("")),
   tin: z.string().trim().nullish().or(z.literal("")),
   is_vatable: z.boolean(),
+  withholds_tax: z.boolean(),
+  is_government: z.boolean(),
   notes: z.string().trim().nullish().or(z.literal("")),
 });
 
@@ -39,11 +41,26 @@ function readForm(formData: FormData) {
     email: formData.get("email"),
     tin: formData.get("tin"),
     is_vatable: formData.get("is_vatable") === "on",
+    withholds_tax: formData.get("withholds_tax") === "on",
+    // A government tenant always withholds, whatever the other box says.
+    is_government: formData.get("is_government") === "on",
     notes: formData.get("notes"),
   });
 }
 
 function toRow(values: z.infer<typeof tenantSchema>) {
+  /*
+   * Withholding is computed on a tenant's VATable inclusions, so a tenant who
+   * is not VAT-registered has nothing to withhold on and cannot be marked as
+   * withholding -- the database refuses it outright. A government tenant is a
+   * withholding one by definition, so ticking that alone is enough.
+   *
+   * The form disables the boxes rather than showing them ticked and refused,
+   * so this only catches a stale form or a request built by hand.
+   */
+  const withholds =
+    values.is_vatable && (values.withholds_tax || values.is_government);
+
   return {
     company_name: values.company_name,
     address: values.address || null,
@@ -53,6 +70,8 @@ function toRow(values: z.infer<typeof tenantSchema>) {
     email: values.email || null,
     tin: values.tin || null,
     is_vatable: values.is_vatable,
+    withholds_tax: withholds,
+    is_government: withholds && values.is_government,
     notes: values.notes || null,
   };
 }
@@ -171,7 +190,7 @@ export async function updateTenant(
   const { data: before } = await supabase
     .from("tenants")
     .select(
-      "company_name, address, company_number, contact_person, mobile_number, email, tin, is_vatable, notes",
+      "company_name, address, company_number, contact_person, mobile_number, email, tin, is_vatable, withholds_tax, is_government, notes",
     )
     .eq("id", id)
     .single();
