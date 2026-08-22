@@ -48,6 +48,7 @@ const LAYOUT_LABELS: Record<string, string> = {
   "occupancy-by-location": "Occupancy per location",
   "postdated-cheques": "Postdated cheques",
   "utility-usage": "Utility usage",
+  "billing-turnaround": "Billing turnaround",
 };
 
 /** Spec 3: warn two days before the due date, and once overdue. */
@@ -129,6 +130,13 @@ export default async function DashboardPage({
   const seeUtilities = can(permissions, MODULE.dashboardUtilities, "view");
   const seeNotifications = can(permissions, MODULE.dashboardNotifications, "view");
   const seeCheques = can(permissions, MODULE.dashboardCheques, "view");
+  /*
+   * How long the billing takes to follow the meter reading is a question
+   * about the people doing it, so it is the company's administrator who
+   * sees it, not whoever happens to have the utilities panel.
+   */
+  const seeTurnaround =
+    context.isSuperAdmin || Boolean(context.activeCompany?.isCompanyAdmin);
   const showAttention = view === "attention";
   const seesAnyPanel =
     seeOccupancy || seeIncome || seeUtilities || seeNotifications || seeCheques;
@@ -145,6 +153,7 @@ export default async function DashboardPage({
     { data: myReminders },
     { data: dueSchedules },
     { data: expiringDocs },
+    { data: turnaroundPeriods },
   ] = await Promise.all([
     seeOccupancy
       ? supabase
@@ -364,6 +373,34 @@ export default async function DashboardPage({
               expires_on: string;
               tenant_id: string;
               tenants: { company_name: string } | null;
+            }[]
+          >()
+      : Promise.resolve({ data: null }),
+    /*
+     * Every utility period with whatever invoices carry it, so the delay
+     * between keying one in and billing it can be read off. Loaded only for
+     * the administrator who is shown it.
+     */
+    seeTurnaround
+      ? supabase
+          .from("utility_periods")
+          .select(
+            "id, utility, period_start, period_end, created_at, locations(code), invoice_lines(invoices(created_at, status))",
+          )
+          .eq("company_id", companyId)
+          .order("created_at", { ascending: false })
+          .limit(60)
+          .returns<
+            {
+              id: string;
+              utility: string;
+              period_start: string;
+              period_end: string;
+              created_at: string;
+              locations: { code: string } | null;
+              invoice_lines: {
+                invoices: { created_at: string; status: string } | null;
+              }[];
             }[]
           >()
       : Promise.resolve({ data: null }),
@@ -628,6 +665,72 @@ export default async function DashboardPage({
       };
     },
   );
+
+  /*
+   * How long a utility period waits before it is billed.
+   *
+   * Measured from when the period was keyed in to when the first invoice
+   * carrying it was generated. Both are the moment of the act rather than
+   * the dates written on them: a period covering July can be entered in
+   * August, and it is the delay in the office that this is asking about.
+   *
+   * A cancelled invoice does not count as having billed anything, so a
+   * period whose only invoice was cancelled reads as still waiting.
+   */
+  const turnaroundRows = (turnaroundPeriods ?? []).map((period) => {
+    const entered = period.created_at.slice(0, 10);
+    const billedAt = (period.invoice_lines ?? [])
+      .map((line) => line.invoices)
+      .filter((invoice) => invoice && invoice.status !== "cancelled")
+      .map((invoice) => invoice!.created_at)
+      .sort()[0];
+
+    const days = (from: string, to: string) =>
+      Math.max(
+        0,
+        Math.round(
+          (new Date(to.slice(0, 10)).getTime() -
+            new Date(from).getTime()) /
+            86_400_000,
+        ),
+      );
+
+    return {
+      id: period.id,
+      utility: period.utility,
+      location: period.locations?.code ?? null,
+      periodStart: period.period_start,
+      periodEnd: period.period_end,
+      entered,
+      billedOn: billedAt ? billedAt.slice(0, 10) : null,
+      lag: billedAt ? days(entered, billedAt) : null,
+      waiting: billedAt ? null : days(entered, today),
+    };
+  });
+
+  const billedPeriods = turnaroundRows.filter((row) => row.lag !== null);
+  const waitingPeriods = turnaroundRows
+    .filter((row) => row.waiting !== null)
+    .sort((a, b) => (b.waiting ?? 0) - (a.waiting ?? 0));
+
+  const averageLag =
+    billedPeriods.length > 0
+      ? Math.round(
+          (billedPeriods.reduce((sum, row) => sum + (row.lag ?? 0), 0) /
+            billedPeriods.length) *
+            10,
+        ) / 10
+      : null;
+  const slowest = billedPeriods.reduce<(typeof billedPeriods)[number] | null>(
+    (worst, row) => (!worst || (row.lag ?? 0) > (worst.lag ?? 0) ? row : worst),
+    null,
+  );
+  const longestWait = waitingPeriods[0] ?? null;
+
+  // Most recent first: the question is usually about how it is going now.
+  const recentTurnaround = [...billedPeriods]
+    .sort((a, b) => b.entered.localeCompare(a.entered))
+    .slice(0, 8);
 
   return (
     <>
@@ -1129,6 +1232,147 @@ export default async function DashboardPage({
           </Card>
           ) : null,
 
+          "billing-turnaround": seeTurnaround ? (
+            <Card
+              title="Billing turnaround"
+              description={
+                averageLag === null
+                  ? "How long a utility period waits before it is billed."
+                  : `On average ${averageLag} day${averageLag === 1 ? "" : "s"} from keying a utility period in to generating the invoice.`
+              }
+              bodyClassName=""
+            >
+              {turnaroundRows.length > 0 ? (
+                <>
+                  <div className="grid gap-4 sm:grid-cols-3 px-5 py-4">
+                    <StatTile
+                      label="Average turnaround"
+                      value={
+                        averageLag === null
+                          ? "—"
+                          : `${averageLag} day${averageLag === 1 ? "" : "s"}`
+                      }
+                      hint={`${billedPeriods.length} period(s) billed`}
+                    />
+                    <StatTile
+                      label="Slowest"
+                      value={
+                        slowest
+                          ? `${slowest.lag} day${slowest.lag === 1 ? "" : "s"}`
+                          : "—"
+                      }
+                      hint={
+                        slowest
+                          ? `${slowest.location ?? "?"} · ${slowest.utility}`
+                          : "Nothing billed yet"
+                      }
+                    />
+                    <StatTile
+                      label="Still unbilled"
+                      value={waitingPeriods.length}
+                      hint={
+                        longestWait
+                          ? `Longest waiting ${longestWait.waiting} day${longestWait.waiting === 1 ? "" : "s"}`
+                          : "All periods billed"
+                      }
+                    />
+                  </div>
+
+                  {/* The ones still waiting lead: they are the only rows
+                      anybody can still do something about. */}
+                  {waitingPeriods.length > 0 ? (
+                    <div className="table-scroll">
+                      <table className="table">
+                        <thead>
+                          <tr>
+                            <th>Not yet billed</th>
+                            <th>Period</th>
+                            <th>Keyed in</th>
+                            <th className="text-right">Waiting</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {waitingPeriods.slice(0, 6).map((row) => (
+                            <tr key={row.id}>
+                              <td className="text-sm">
+                                {row.location ?? "—"} · {row.utility}
+                              </td>
+                              <td className="text-xs">
+                                {formatDate(row.periodStart)} to{" "}
+                                {formatDate(row.periodEnd)}
+                              </td>
+                              <td className="text-xs">{formatDate(row.entered)}</td>
+                              <td
+                                className="text-right tabular-nums text-sm"
+                                style={{
+                                  color:
+                                    (row.waiting ?? 0) > 7
+                                      ? "var(--danger)"
+                                      : undefined,
+                                }}
+                              >
+                                {row.waiting} day{row.waiting === 1 ? "" : "s"}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : null}
+
+                  {recentTurnaround.length > 0 ? (
+                    <div className="table-scroll">
+                      <table className="table">
+                        <thead>
+                          <tr>
+                            <th>Billed</th>
+                            <th>Period</th>
+                            <th>Keyed in</th>
+                            <th>Invoiced</th>
+                            <th className="text-right">Took</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {recentTurnaround.map((row) => (
+                            <tr key={row.id}>
+                              <td className="text-sm">
+                                {row.location ?? "—"} · {row.utility}
+                              </td>
+                              <td className="text-xs">
+                                {formatDate(row.periodStart)} to{" "}
+                                {formatDate(row.periodEnd)}
+                              </td>
+                              <td className="text-xs">{formatDate(row.entered)}</td>
+                              <td className="text-xs">
+                                {row.billedOn ? formatDate(row.billedOn) : "—"}
+                              </td>
+                              <td
+                                className="text-right tabular-nums text-sm"
+                                style={{
+                                  color:
+                                    (row.lag ?? 0) > 7
+                                      ? "var(--danger)"
+                                      : undefined,
+                                }}
+                              >
+                                {row.lag === 0
+                                  ? "same day"
+                                  : `${row.lag} day${row.lag === 1 ? "" : "s"}`}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : null}
+                </>
+              ) : (
+                <EmptyState>
+                  No utility periods recorded yet, so there is nothing to time.
+                </EmptyState>
+              )}
+            </Card>
+          ) : null,
           "utility-usage": seeUtilities ? (
           <Card
             title="Utility usage"

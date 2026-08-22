@@ -16,6 +16,9 @@ export const PANEL_KEYS = [
   "occupancy-by-location",
   "postdated-cheques",
   "utility-usage",
+  // Last, and only an administrator sees it: it is about how the work is
+  // going rather than about the work itself.
+  "billing-turnaround",
 ] as const;
 
 /** The figures along the top, left to right. */
