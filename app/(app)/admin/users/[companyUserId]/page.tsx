@@ -7,6 +7,12 @@ import { requirePermission } from "@/lib/auth";
 import { MODULE, PERMISSION_ACTIONS, can, type ModuleRow } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
 
+import { setUserCompanyAccess } from "../company-access-actions";
+import {
+  CompanyAccessMatrix,
+  type CompanySeat,
+} from "../company-access-form";
+
 import {
   resetUserPassword,
   saveUserOverrides,
@@ -95,6 +101,68 @@ export default async function UserDetailPage({
         .select("module_key, can_view, can_edit, can_delete, can_approve, can_void")
         .eq("company_user_id", companyUserId),
     ]);
+
+  /*
+   * Access is a row per company, so answering "which companies is this
+   * person allowed into" means reading them all. Roles come with them:
+   * a role belongs to one company, so each row offers its own.
+   */
+  const [{ data: allCompanies }, { data: theirSeats }, { data: allRoles }, { data: mySeats }] =
+    await Promise.all([
+      supabase
+        .from("companies")
+        .select("id, name")
+        .eq("is_active", true)
+        .order("name")
+        .returns<{ id: string; name: string }[]>(),
+      supabase
+        .from("company_users")
+        .select("company_id, role_id, is_active, is_company_admin")
+        .eq("user_id", member.user_id)
+        .returns<
+          {
+            company_id: string;
+            role_id: string | null;
+            is_active: boolean;
+            is_company_admin: boolean;
+          }[]
+        >(),
+      supabase
+        .from("roles")
+        .select("id, name, company_id")
+        .eq("is_active", true)
+        .order("name")
+        .returns<{ id: string; name: string; company_id: string }[]>(),
+      supabase
+        .from("company_users")
+        .select("company_id, is_company_admin, is_active")
+        .eq("user_id", context.userId)
+        .returns<
+          { company_id: string; is_company_admin: boolean; is_active: boolean }[]
+        >(),
+    ]);
+
+  const iAdminister = new Set(
+    (mySeats ?? [])
+      .filter((seat) => seat.is_company_admin && seat.is_active)
+      .map((seat) => seat.company_id),
+  );
+  const seatIn = new Map(
+    (theirSeats ?? []).map((seat) => [seat.company_id, seat]),
+  );
+
+  const companySeats: CompanySeat[] = (allCompanies ?? []).map((company) => {
+    const seat = seatIn.get(company.id);
+    return {
+      id: company.id,
+      name: company.name,
+      allowed: Boolean(seat?.is_active),
+      roleId: seat?.role_id ?? null,
+      roles: (allRoles ?? []).filter((role) => role.company_id === company.id),
+      canAdminister: context.isSuperAdmin || iAdminister.has(company.id),
+      isCompanyAdmin: Boolean(seat?.is_company_admin),
+    };
+  });
 
   const roleByModule = new Map(
     (rolePermissions ?? []).map((row) => [row.module_key, row]),
@@ -231,6 +299,23 @@ export default async function UserDetailPage({
           )}
         </Card>
       </div>
+
+      {/* The same question asked across every company, so somebody can be
+          let into another without switching company to do it. */}
+      {canEdit && companySeats.length > 1 ? (
+        <div className="mb-6">
+          <Card
+            title="Companies this person may sign in to"
+            description="Tick the companies they are allowed into, and choose their role in each. A role belongs to one company, so each is chosen separately."
+          >
+            <CompanyAccessMatrix
+              action={setUserCompanyAccess}
+              userId={member.user_id}
+              seats={companySeats}
+            />
+          </Card>
+        </div>
+      ) : null}
 
       {member.is_company_admin ? (
         <Card title="Per-user overrides">

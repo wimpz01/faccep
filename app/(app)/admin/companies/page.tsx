@@ -6,6 +6,8 @@ import { requireSession } from "@/lib/auth";
 import { MODULE, can } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
 
+import { copyCompanySettings } from "./copy-actions";
+import { CopySettingsForm } from "./copy-settings-form";
 import { createCompany, setCompanyActive, updateCompany } from "./actions";
 import { CompanyForm } from "./company-form";
 
@@ -41,13 +43,41 @@ export default async function CompaniesPage() {
     can(context.permissions, MODULE.adminCompanies, "edit");
 
   const supabase = await createClient();
-  const { data: companies } = await supabase
-    .from("companies")
-    .select(
-      "id, name, legal_name, tin, address, zip_code, contact_person, contact_number, email, is_active",
-    )
-    .order("name")
-    .returns<CompanyRow[]>();
+  const [{ data: companies }, { data: seats }] = await Promise.all([
+    supabase
+      .from("companies")
+      .select(
+        "id, name, legal_name, tin, address, zip_code, contact_person, contact_number, email, is_active",
+      )
+      .order("name")
+      .returns<CompanyRow[]>(),
+    supabase
+      .from("company_users")
+      .select("company_id, is_company_admin, is_active")
+      .eq("user_id", context.userId)
+      .returns<
+        { company_id: string; is_company_admin: boolean; is_active: boolean }[]
+      >(),
+  ]);
+
+  const administers = new Set(
+    (seats ?? [])
+      .filter((seat) => seat.is_company_admin && seat.is_active)
+      .map((seat) => seat.company_id),
+  );
+
+  /*
+   * Every company but the one being copied from. A company the caller
+   * cannot administer is listed and disabled rather than omitted, so it is
+   * clear it exists and why it cannot be chosen.
+   */
+  const otherCompanies = (companies ?? [])
+    .filter((row) => row.id !== context.activeCompany?.companyId)
+    .map((row) => ({
+      id: row.id,
+      name: row.name,
+      canAdminister: context.isSuperAdmin || administers.has(row.id),
+    }));
 
   return (
     <>
@@ -60,9 +90,27 @@ export default async function CompaniesPage() {
         <div className="mb-6">
           <Card
             title="Add a company"
-            description="Only a super admin can create a company."
+            description="Only a super admin can create a company. It starts empty — use the panel below to copy this company’s settings into it."
           >
             <CompanyForm action={createCompany} submitLabel="Create company" />
+          </Card>
+        </div>
+      ) : null}
+
+      {/* Screens, reports and modules are code and reach every company on
+          their own. These settings are held per company, so they are the
+          only ones that need pushing across. */}
+      {canEdit && context.activeCompany ? (
+        <div className="mb-6">
+          <Card
+            title="Copy settings to other companies"
+            description="Views, reports and modules are shared by every company already. These are the settings each company keeps its own copy of."
+          >
+            <CopySettingsForm
+              action={copyCompanySettings}
+              sourceName={context.activeCompany.companyName}
+              companies={otherCompanies}
+            />
           </Card>
         </div>
       ) : null}
