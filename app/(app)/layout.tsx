@@ -74,6 +74,12 @@ export default async function AppLayout({
   if (can(permissions, MODULE.billingInvoices, "view")) {
     billing.push({ href: "/billing/invoices", label: "Invoices" });
   }
+  if (can(permissions, MODULE.billingInvoices, "edit")) {
+    billing.push({
+      href: "/billing/invoices/print-layout",
+      label: "Billing print layout",
+    });
+  }
   if (can(permissions, MODULE.payments, "view")) {
     billing.push({ href: "/payments", label: "Payments" });
   }

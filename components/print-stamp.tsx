@@ -55,3 +55,36 @@ export function PrintStamp() {
     </div>
   );
 }
+
+/**
+ * The same stamp, inline in a document's own footer.
+ *
+ * Where PrintStamp sits in the page corner for every document, this is placed
+ * deliberately -- under the signature lines of an invoice, say -- because the
+ * document's layout has a place for it. Visible on screen as well as on paper,
+ * since a figure that appears only when printed reads as missing.
+ */
+export function PrintedAt({ className }: { className?: string }) {
+  const [stamp, setStamp] = useState("");
+
+  useEffect(() => {
+    const mark = () =>
+      setStamp(
+        new Date().toLocaleString("en-PH", {
+          year: "numeric",
+          month: "short",
+          day: "numeric",
+          hour: "numeric",
+          minute: "2-digit",
+          hour12: true,
+        }),
+      );
+
+    mark();
+    window.addEventListener("beforeprint", mark);
+    return () => window.removeEventListener("beforeprint", mark);
+  }, []);
+
+  // Empty on the server so the markup matches until the clock is read.
+  return <span className={className}>{stamp ? `Printed ${stamp}` : ""}</span>;
+}

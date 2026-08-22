@@ -1048,3 +1048,178 @@ export async function cancelDraftInvoice(
   revalidatePath("/billing/invoices");
   return { success: "Cancelled. The record is kept for the trail." };
 }
+
+/**
+ * Saves how a billing is laid out when printed.
+ *
+ * Affects the sheet only. No invoice is touched, nothing is recomputed, and a
+ * billing already issued prints under whatever layout is current -- which is
+ * the point: the paper changes, the money does not.
+ */
+export async function updateInvoicePrintLayout(
+  _prevState: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  let companyId: string;
+  try {
+    const context = await assertPermission(MODULE.billingInvoices, "edit");
+    companyId = context.activeCompany!.companyId;
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+
+  const number = (field: string, low: number, high: number, label: string) => {
+    const value = Number(formData.get(field));
+    if (!Number.isFinite(value) || value < low || value > high) {
+      return { error: `${label} must be between ${low} and ${high}.` };
+    }
+    return { value };
+  };
+
+  const width = number("page_width_in", 3, 24, "Page width");
+  if ("error" in width) return { error: width.error };
+  const height = number("page_height_in", 3, 24, "Page height");
+  if ("error" in height) return { error: height.error };
+  const margin = number("margin_in", 0, 2, "Margin");
+  if ("error" in margin) return { error: margin.error };
+  const body = number("body_font_pt", 5, 16, "Body type size");
+  if ("error" in body) return { error: body.error };
+  const table = number("table_font_pt", 5, 16, "Table type size");
+  if ("error" in table) return { error: table.error };
+
+  const note = String(formData.get("footer_note") ?? "").trim();
+
+  const row = {
+    page_width_in: width.value,
+    page_height_in: height.value,
+    margin_in: margin.value,
+    body_font_pt: body.value,
+    table_font_pt: table.value,
+    // An unticked box sends nothing at all, which is what makes it false.
+    show_logo: formData.get("show_logo") !== null,
+    show_company_header: formData.get("show_company_header") !== null,
+    show_meter_columns: formData.get("show_meter_columns") !== null,
+    show_meter_dates: formData.get("show_meter_dates") !== null,
+    show_vat_column: formData.get("show_vat_column") !== null,
+    show_payment_note: formData.get("show_payment_note") !== null,
+    show_signatures: formData.get("show_signatures") !== null,
+    footer_note: note === "" ? null : note,
+  };
+
+  const supabase = await createClient();
+  const { error } = await supabase
+    .from("invoice_print_settings")
+    .upsert({ company_id: companyId, ...row }, { onConflict: "company_id" });
+  if (error) return { error: error.message };
+
+  await logAudit({
+    action: "update",
+    moduleKey: MODULE.billingInvoices,
+    entityTable: "invoice_print_settings",
+    entityId: companyId,
+    summary: `Billing print layout set to ${row.page_width_in}in x ${row.page_height_in}in.`,
+    after: row,
+  });
+
+  revalidatePath("/billing/invoices/print-layout");
+  revalidatePath("/billing/invoices");
+  return {
+    success: `Saved. Billings now print on ${row.page_width_in}in x ${row.page_height_in}in.`,
+  };
+}
+
+/**
+ * Points the company at a newly uploaded logo, and clears away the one before.
+ *
+ * The file is already in storage by the time this runs -- the browser puts it
+ * there directly -- so this records where it went and removes the previous
+ * mark, which nothing would otherwise ever delete.
+ */
+export async function setCompanyLogo(path: string) {
+  let companyId: string;
+  try {
+    const context = await assertPermission(MODULE.billingInvoices, "edit");
+    companyId = context.activeCompany!.companyId;
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+
+  // The path is built by the browser, so it is checked rather than trusted:
+  // one company must not be able to point at another's folder.
+  if (!path.startsWith(`${companyId}/branding/`)) {
+    return { error: "That file does not belong to this company." };
+  }
+
+  const supabase = await createClient();
+  const { data: before } = await supabase
+    .from("companies")
+    .select("logo_path")
+    .eq("id", companyId)
+    .maybeSingle<{ logo_path: string | null }>();
+
+  const { error } = await supabase
+    .from("companies")
+    .update({ logo_path: path })
+    .eq("id", companyId);
+  if (error) return { error: error.message };
+
+  if (before?.logo_path && before.logo_path !== path) {
+    await supabase.storage.from("documents").remove([before.logo_path]);
+  }
+
+  await logAudit({
+    action: "update",
+    moduleKey: MODULE.billingInvoices,
+    entityTable: "companies",
+    entityId: companyId,
+    summary: "Set the company logo shown on printed documents.",
+    before: { logo_path: before?.logo_path ?? null },
+    after: { logo_path: path },
+  });
+
+  revalidatePath("/billing/invoices/print-layout");
+  revalidatePath("/billing/invoices");
+  return {};
+}
+
+/** Takes the logo off the documents, and out of storage with it. */
+export async function clearCompanyLogo() {
+  let companyId: string;
+  try {
+    const context = await assertPermission(MODULE.billingInvoices, "edit");
+    companyId = context.activeCompany!.companyId;
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+
+  const supabase = await createClient();
+  const { data: before } = await supabase
+    .from("companies")
+    .select("logo_path")
+    .eq("id", companyId)
+    .maybeSingle<{ logo_path: string | null }>();
+
+  const { error } = await supabase
+    .from("companies")
+    .update({ logo_path: null })
+    .eq("id", companyId);
+  if (error) return { error: error.message };
+
+  if (before?.logo_path) {
+    await supabase.storage.from("documents").remove([before.logo_path]);
+  }
+
+  await logAudit({
+    action: "update",
+    moduleKey: MODULE.billingInvoices,
+    entityTable: "companies",
+    entityId: companyId,
+    summary: "Removed the company logo from printed documents.",
+    before: { logo_path: before?.logo_path ?? null },
+    after: { logo_path: null },
+  });
+
+  revalidatePath("/billing/invoices/print-layout");
+  revalidatePath("/billing/invoices");
+  return {};
+}

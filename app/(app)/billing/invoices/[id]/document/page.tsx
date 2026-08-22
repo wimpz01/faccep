@@ -3,6 +3,11 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 
 import { PrintButton } from "@/components/print-button";
+import { PrintedAt } from "@/components/print-stamp";
+import {
+  printStyleFor,
+  readPrintSettings,
+} from "@/lib/invoice-print";
 import { requirePermission } from "@/lib/auth";
 import { formatDate, money } from "@/lib/format";
 import { MODULE } from "@/lib/permissions";
@@ -101,7 +106,8 @@ export default async function InvoiceDocumentPage({
   const companyId = context.activeCompany!.companyId;
 
   const supabase = await createClient();
-  const [{ data: invoice }, { data: company }] = await Promise.all([
+  const [{ data: invoice }, { data: company }, { data: printRow }] =
+    await Promise.all([
     supabase
       .from("invoices")
       .select(
@@ -116,12 +122,45 @@ export default async function InvoiceDocumentPage({
       .maybeSingle<InvoiceDoc>(),
     supabase
       .from("companies")
-      .select("name, legal_name, address, tin, contact_number, email")
+      .select("name, legal_name, address, tin, contact_number, email, logo_path")
       .eq("id", companyId)
       .single(),
+    supabase
+      .from("invoice_print_settings")
+      .select("*")
+      .eq("company_id", companyId)
+      .maybeSingle(),
   ]);
 
+  // Falls back to sensible defaults rather than failing to print.
+  const print = readPrintSettings(printRow);
+
+  /*
+   * The bucket is private, so the mark needs a signed URL. Only fetched
+   * when there is one and the layout asks for it -- a billing printed on
+   * letterhead should not be signing a URL it will never use.
+   */
+  let logoUrl: string | null = null;
+  if (print.show_logo && company?.logo_path) {
+    const { data: signed } = await supabase.storage
+      .from("documents")
+      .createSignedUrl(company.logo_path, 3600);
+    logoUrl = signed?.signedUrl ?? null;
+  }
+
   if (!invoice || invoice.company_id !== companyId) notFound();
+
+  /*
+   * How many columns the totals have to reach across. The readings and the
+   * VAT split can each be turned off, so this cannot be a constant: a
+   * totals row that spans more columns than the table has pushes the figure
+   * off the end of the sheet.
+   */
+  const labelSpan =
+    1 + // particulars
+    (print.show_meter_columns ? 3 : 0) +
+    1 + // net
+    (print.show_vat_column ? 1 : 0);
 
   const lines = [...(invoice.invoice_lines ?? [])].sort(
     (a, b) => a.sort_order - b.sort_order,
@@ -198,18 +237,60 @@ export default async function InvoiceDocumentPage({
         </div>
       ) : null}
 
+      {/*
+       * The sheet this company prints billings on, from its own settings.
+       * Emitted here rather than in the global stylesheet so it applies to
+       * the billing and leaves every other document on A4, and declared
+       * after that stylesheet so it is this rule that wins.
+       */}
+      <style>{printStyleFor(print)}</style>
+
       <article className="doc-sheet card">
         <div style={{ display: "flex", justifyContent: "space-between", gap: "1rem" }}>
           <div>
-            <p style={{ fontWeight: 700, fontSize: "1.05rem", marginBottom: 2 }}>
-              {company?.legal_name ?? company?.name}
-            </p>
-            <p style={{ margin: 0, fontSize: "0.8rem" }}>{company?.address ?? ""}</p>
-            {company?.tin ? (
-              <p style={{ margin: 0, fontSize: "0.8rem" }}>TIN {company.tin}</p>
+            {/* The mark, where the company has one and wants it printed.
+                Off when the sheet is letterhead that carries its own. */}
+            {print.show_logo && logoUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={logoUrl}
+                alt=""
+                style={{
+                  maxHeight: "46px",
+                  maxWidth: "200px",
+                  objectFit: "contain",
+                  display: "block",
+                  marginBottom: "0.4rem",
+                }}
+              />
             ) : null}
-            {company?.contact_number ? (
-              <p style={{ margin: 0, fontSize: "0.8rem" }}>{company.contact_number}</p>
+            {/* The wording beside the mark. Left off when the sheet is
+                letterhead that already carries it. */}
+            {print.show_company_header ? (
+              <>
+                <p
+                  style={{
+                    fontWeight: 700,
+                    fontSize: "1.05rem",
+                    marginBottom: 2,
+                  }}
+                >
+                  {company?.legal_name ?? company?.name}
+                </p>
+                <p style={{ margin: 0, fontSize: "0.8rem" }}>
+                  {company?.address ?? ""}
+                </p>
+                {company?.tin ? (
+                  <p style={{ margin: 0, fontSize: "0.8rem" }}>
+                    TIN {company.tin}
+                  </p>
+                ) : null}
+                {company?.contact_number ? (
+                  <p style={{ margin: 0, fontSize: "0.8rem" }}>
+                    {company.contact_number}
+                  </p>
+                ) : null}
+              </>
             ) : null}
           </div>
           <div style={{ textAlign: "right" }}>
@@ -255,11 +336,19 @@ export default async function InvoiceDocumentPage({
           <thead>
             <tr>
               <th>Particulars</th>
-              <th style={{ textAlign: "right", width: "6rem" }}>Previous</th>
-              <th style={{ textAlign: "right", width: "6rem" }}>Present</th>
-              <th style={{ textAlign: "right", width: "6rem" }}>Usage</th>
+              {/* The readings and the VAT split are the columns a short
+                  sheet gives up first, so both are settings. */}
+              {print.show_meter_columns ? (
+                <>
+                  <th style={{ textAlign: "right", width: "6rem" }}>Previous</th>
+                  <th style={{ textAlign: "right", width: "6rem" }}>Present</th>
+                  <th style={{ textAlign: "right", width: "6rem" }}>Usage</th>
+                </>
+              ) : null}
               <th style={{ textAlign: "right", width: "7rem" }}>Net</th>
-              <th style={{ textAlign: "right", width: "6rem" }}>VAT</th>
+              {print.show_vat_column ? (
+                <th style={{ textAlign: "right", width: "6rem" }}>VAT</th>
+              ) : null}
               <th style={{ textAlign: "right", width: "8rem" }}>Total</th>
             </tr>
           </thead>
@@ -287,34 +376,42 @@ export default async function InvoiceDocumentPage({
                       {/* The provider's own cycle, which rarely matches the
                           calendar month the rent is for. Said here so the bill
                           does not imply these readings are the month's. */}
-                      {index === 0 && line.utility_periods ? (
+                      {print.show_meter_dates &&
+                      index === 0 &&
+                      line.utility_periods ? (
                         <p style={{ margin: 0, fontSize: "0.75rem" }}>
                           Metered {formatDate(line.utility_periods.period_start)}{" "}
                           to {formatDate(line.utility_periods.period_end)}
                         </p>
                       ) : null}
                     </td>
-                    <td style={{ textAlign: "right" }}>
-                      {Number(meter.previous_reading)}
-                    </td>
-                    <td style={{ textAlign: "right" }}>
-                      {Number(meter.present_reading)}
-                    </td>
-                    <td style={{ textAlign: "right" }}>
-                      {Number(meter.consumption)} {unit}
-                    </td>
+                    {print.show_meter_columns ? (
+                      <>
+                        <td style={{ textAlign: "right" }}>
+                          {Number(meter.previous_reading)}
+                        </td>
+                        <td style={{ textAlign: "right" }}>
+                          {Number(meter.present_reading)}
+                        </td>
+                        <td style={{ textAlign: "right" }}>
+                          {Number(meter.consumption)} {unit}
+                        </td>
+                      </>
+                    ) : null}
                     {/* The charge is on the line, not the meter, so it is
                         shown once against the last of them. */}
                     <td style={{ textAlign: "right" }}>
                       {index === meters.length - 1 ? money(line.net_amount) : ""}
                     </td>
-                    <td style={{ textAlign: "right" }}>
-                      {index === meters.length - 1
-                        ? Number(line.vat_amount) > 0
-                          ? money(line.vat_amount)
-                          : (TREATMENT_NOTE[line.tax_treatment] ?? "—")
-                        : ""}
-                    </td>
+                    {print.show_vat_column ? (
+                      <td style={{ textAlign: "right" }}>
+                        {index === meters.length - 1
+                          ? Number(line.vat_amount) > 0
+                            ? money(line.vat_amount)
+                            : (TREATMENT_NOTE[line.tax_treatment] ?? "—")
+                          : ""}
+                      </td>
+                    ) : null}
                     <td style={{ textAlign: "right" }}>
                       {index === meters.length - 1 ? money(line.line_total) : ""}
                     </td>
@@ -326,44 +423,50 @@ export default async function InvoiceDocumentPage({
                 <tr key={line.id}>
                   <td>
                     {particulars}
-                    {metered && line.utility_periods ? (
+                    {print.show_meter_dates && metered && line.utility_periods ? (
                       <p style={{ margin: 0, fontSize: "0.75rem" }}>
                         Metered {formatDate(line.utility_periods.period_start)}{" "}
                         to {formatDate(line.utility_periods.period_end)}
                       </p>
                     ) : null}
                   </td>
-                  <td />
-                  <td />
-                  <td style={{ textAlign: "right" }}>
-                    {metered ? `${Number(line.quantity)} ${unit}` : ""}
-                  </td>
+                  {print.show_meter_columns ? (
+                    <>
+                      <td />
+                      <td />
+                      <td style={{ textAlign: "right" }}>
+                        {metered ? `${Number(line.quantity)} ${unit}` : ""}
+                      </td>
+                    </>
+                  ) : null}
                   <td style={{ textAlign: "right" }}>{money(line.net_amount)}</td>
-                  <td style={{ textAlign: "right" }}>
-                    {Number(line.vat_amount) > 0
-                      ? money(line.vat_amount)
-                      : (TREATMENT_NOTE[line.tax_treatment] ?? "—")}
-                  </td>
+                  {print.show_vat_column ? (
+                    <td style={{ textAlign: "right" }}>
+                      {Number(line.vat_amount) > 0
+                        ? money(line.vat_amount)
+                        : (TREATMENT_NOTE[line.tax_treatment] ?? "—")}
+                    </td>
+                  ) : null}
                   <td style={{ textAlign: "right" }}>{money(line.line_total)}</td>
                 </tr>
               );
             })}
             <tr>
-              <td colSpan={6} style={{ textAlign: "right", fontWeight: 700 }}>
+              <td colSpan={labelSpan} style={{ textAlign: "right", fontWeight: 700 }}>
                 Subtotal
               </td>
               <td style={{ textAlign: "right" }}>{money(invoice.subtotal)}</td>
             </tr>
             {invoice.is_vatable ? (
               <tr>
-                <td colSpan={6} style={{ textAlign: "right", fontWeight: 700 }}>
+                <td colSpan={labelSpan} style={{ textAlign: "right", fontWeight: 700 }}>
                   VAT ({Number(invoice.vat_rate)}%)
                 </td>
                 <td style={{ textAlign: "right" }}>{money(invoice.vat_amount)}</td>
               </tr>
             ) : null}
             <tr>
-              <td colSpan={6} style={{ textAlign: "right", fontWeight: 700 }}>
+              <td colSpan={labelSpan} style={{ textAlign: "right", fontWeight: 700 }}>
                 Total due
               </td>
               <td style={{ textAlign: "right", fontWeight: 700 }}>
@@ -373,7 +476,7 @@ export default async function InvoiceDocumentPage({
             {Number(invoice.amount_paid) > 0 || Number(invoice.credited_amount) > 0 ? (
               <>
                 <tr>
-                  <td colSpan={6} style={{ textAlign: "right" }}>
+                  <td colSpan={labelSpan} style={{ textAlign: "right" }}>
                     Less payments and credits
                   </td>
                   <td style={{ textAlign: "right" }}>
@@ -381,7 +484,7 @@ export default async function InvoiceDocumentPage({
                   </td>
                 </tr>
                 <tr>
-                  <td colSpan={6} style={{ textAlign: "right", fontWeight: 700 }}>
+                  <td colSpan={labelSpan} style={{ textAlign: "right", fontWeight: 700 }}>
                     Balance
                   </td>
                   <td style={{ textAlign: "right", fontWeight: 700 }}>
@@ -393,16 +496,58 @@ export default async function InvoiceDocumentPage({
           </tbody>
         </table>
 
-        <p style={{ fontSize: "0.8rem" }}>
-          Payment is due by {formatDate(invoice.due_date)}. Water and electricity
-          charges unpaid more than one week after receipt of this billing attract
-          a late payment penalty.
-        </p>
+        {print.show_payment_note ? (
+          <p style={{ fontSize: "0.8rem" }}>
+            Payment is due by {formatDate(invoice.due_date)}. Water and
+            electricity charges unpaid more than one week after receipt of this
+            billing attract a late payment penalty.
+          </p>
+        ) : null}
 
-        <div style={{ marginTop: "2rem", fontSize: "0.8rem" }}>
-          <p style={{ marginBottom: "2.5rem" }}>Prepared by:</p>
-          <p>______________________________</p>
-        </div>
+        {print.show_signatures ? (
+          <>
+            {/*
+             * The two signatures side by side, which is how the sheet is
+             * signed: whoever raised the billing on the left, the tenant
+             * taking it on the right. Stacking them would push the second
+             * off a short page.
+             */}
+            <div style={{ marginTop: "1.5rem", fontSize: "0.8rem" }}>
+              <div
+                style={{
+                  display: "flex",
+                  gap: "2rem",
+                  justifyContent: "space-between",
+                }}
+              >
+                <div style={{ flex: "1 1 0" }}>
+                  <p style={{ marginBottom: "2rem" }}>Prepared by:</p>
+                  <p>______________________________</p>
+                </div>
+                <div style={{ flex: "1 1 0" }}>
+                  <p style={{ marginBottom: "2rem" }}>Received by:</p>
+                  <p>______________________________</p>
+                </div>
+              </div>
+            </div>
+          </>
+        ) : null}
+
+        {print.footer_note ? (
+          <p style={{ marginTop: "0.75rem", fontSize: "0.75rem" }}>
+            {print.footer_note}
+          </p>
+        ) : null}
+
+        <p
+          style={{
+            marginTop: "0.75rem",
+            fontSize: "0.7rem",
+            color: "#6b7280",
+          }}
+        >
+          <PrintedAt />
+        </p>
       </article>
     </>
   );
