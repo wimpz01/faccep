@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 
 import { Card, EmptyState, PageHeader } from "@/components/ui";
 import { requirePermission } from "@/lib/auth";
@@ -43,6 +44,13 @@ export default async function LocationsPage() {
       <PageHeader
         title="Locations"
         description={`Buildings and properties owned by ${context.activeCompany!.companyName}.`}
+        action={
+          canEdit ? (
+            <Link href="/portfolio/locations/import" className="btn btn-secondary btn-sm">
+              Import locations
+            </Link>
+          ) : undefined
+        }
       />
 
       {canEdit ? (

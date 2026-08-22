@@ -57,9 +57,6 @@ export default async function AppLayout({
   if (can(permissions, MODULE.tenants, "view")) {
     portfolio.push({ href: "/tenants", label: "Tenants" });
   }
-  if (can(permissions, MODULE.tenants, "edit")) {
-    portfolio.push({ href: "/tenants/import", label: "Import tenants" });
-  }
   if (can(permissions, MODULE.contracts, "view")) {
     portfolio.push({ href: "/contracts", label: "Contracts" });
   }

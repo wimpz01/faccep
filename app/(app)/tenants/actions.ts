@@ -400,6 +400,13 @@ export async function importTenants(
       email: at(cells, "email"),
       tin: at(cells, "tin"),
       is_vatable: asBoolean(at(cells, "is_vatable")),
+      /*
+       * Both are columns the importer accepts but does not require. A tenant
+       * only withholds where they are VAT-registered, which the schema also
+       * insists on, so the flag is read but never inferred.
+       */
+      withholds_tax: asBoolean(at(cells, "withholds_tax")),
+      is_government: asBoolean(at(cells, "is_government")),
       notes: at(cells, "notes"),
     });
     if (!parsed.success) {

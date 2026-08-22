@@ -63,7 +63,7 @@ export default async function TenantsPage({
           canEdit ? (
             <div className="flex gap-2 flex-wrap">
               <Link href="/tenants/import" className="btn btn-secondary btn-sm">
-                Import a list
+                Import tenants
               </Link>
               {adding ? (
                 <Link href="/tenants" className="btn btn-secondary btn-sm">

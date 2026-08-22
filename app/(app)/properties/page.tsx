@@ -97,6 +97,13 @@ export default async function PropertiesPage({
       <PageHeader
         title="Properties & Units"
         description="Occupancy and unit inventory per location."
+        action={
+          canEditUnits ? (
+            <Link href="/properties/import" className="btn btn-secondary btn-sm">
+              Import units
+            </Link>
+          ) : undefined
+        }
       />
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-6">

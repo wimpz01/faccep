@@ -81,9 +81,14 @@ export default async function ContractsPage({
         description="Lease agreements, their terms and their renewal windows."
         action={
           canEdit ? (
-            <Link href="/contracts/new" className="btn btn-primary btn-sm">
-              New contract
-            </Link>
+            <div className="flex gap-2 flex-wrap">
+              <Link href="/contracts/import" className="btn btn-secondary btn-sm">
+                Import contracts
+              </Link>
+              <Link href="/contracts/new" className="btn btn-primary btn-sm">
+                New contract
+              </Link>
+            </div>
           ) : undefined
         }
       />
