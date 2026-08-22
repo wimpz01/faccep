@@ -73,6 +73,7 @@ export async function ReportShell({
   from,
   to,
   showRange = true,
+  leadingFilters,
   extraFilters,
   filterNote,
   scopeNote,
@@ -83,6 +84,13 @@ export async function ReportShell({
   from?: string;
   to?: string;
   showRange?: boolean;
+  /**
+   * Filters shown before the dates. For the one that decides what the
+   * report is about rather than merely when: which property is being read
+   * is the first question, and a control for it after the dates reads as an
+   * afterthought.
+   */
+  leadingFilters?: ReactNode;
   extraFilters?: ReactNode;
   /**
    * A word about the filters, shown under the whole row rather than beneath
@@ -123,10 +131,11 @@ export async function ReportShell({
           }
         />
 
-        {showRange || extraFilters ? (
+        {showRange || extraFilters || leadingFilters ? (
           <div className="card mb-5">
             <div className="card-body">
               <form method="get" className="grid gap-3 sm:grid-cols-5 items-end">
+                {leadingFilters}
                 {showRange ? (
                   <>
                     <div>
