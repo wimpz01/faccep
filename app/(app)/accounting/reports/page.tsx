@@ -33,7 +33,12 @@ function defaultRange() {
 export default async function FinancialStatementsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ from?: string; to?: string; statement?: string }>;
+  searchParams: Promise<{
+    from?: string;
+    to?: string;
+    statement?: string;
+    location?: string;
+  }>;
 }) {
   const filters = await searchParams;
   const context = await requirePermission(MODULE.reportsFinancials, "view");
@@ -63,28 +68,71 @@ export default async function FinancialStatementsPage({
   const shows = (key: Exclude<StatementKey, "all">) =>
     statement === "all" || statement === key;
 
+  /*
+   * Which property the income statement is read for. Only the income
+   * statement: a balance sheet cannot be split by building without
+   * inter-property clearing accounts, and a trial balance would not
+   * balance, so both stay company-wide whatever is chosen here.
+   */
+  const location = filters.location && filters.location !== "all"
+    ? filters.location
+    : null;
+
   const supabase = await createClient();
 
   // Period figures drive the income statement; inception-to-date drives the
   // balance sheet, because balance-sheet accounts accumulate.
-  const [{ data: period }, { data: cumulative }] = await Promise.all([
-    supabase.rpc("trial_balance", { p_company: companyId, p_from: from, p_to: to }),
-    supabase.rpc("trial_balance", {
-      p_company: companyId,
-      p_from: "1900-01-01",
-      p_to: to,
-    }),
-  ]);
+  const [{ data: period }, { data: cumulative }, { data: perProperty }, { data: locations }] =
+    await Promise.all([
+      supabase.rpc("trial_balance", { p_company: companyId, p_from: from, p_to: to }),
+      supabase.rpc("trial_balance", {
+        p_company: companyId,
+        p_from: "1900-01-01",
+        p_to: to,
+      }),
+      // Income and expense only, narrowed to the chosen property.
+      supabase.rpc("income_statement", {
+        p_company: companyId,
+        p_from: from,
+        p_to: to,
+        p_location: location,
+      }),
+      supabase
+        .from("locations")
+        .select("id, code, name")
+        .eq("company_id", companyId)
+        .order("code")
+        .returns<{ id: string; code: string; name: string }[]>(),
+    ]);
 
   // rpc() does not infer set-returning types, so the shape is asserted here.
   const periodRows = (period ?? []) as TrialRow[];
   const cumulativeRows = (cumulative ?? []) as TrialRow[];
 
+  /*
+   * What the income statement is headed with, and the caveat the others need
+   * when a property is chosen: only this statement is narrowed.
+   */
+  const locationLabel = !location
+    ? null
+    : location === "unallocated"
+      ? "Unallocated"
+      : (() => {
+          const place = (locations ?? []).find((row) => row.id === location);
+          return place ? `${place.code} — ${place.name}` : "Unknown property";
+        })();
+
   const byType = (rows: TrialRow[], type: string) =>
     rows.filter((row) => row.account_type === type && Number(row.balance) !== 0);
 
-  const income = byType(periodRows, "income");
-  const expenses = byType(periodRows, "expense");
+  /*
+   * The income statement comes from its own function so it can be narrowed
+   * to one property. With none chosen it returns the same figures the trial
+   * balance does, so the statements still agree with each other.
+   */
+  const incomeRows = (perProperty ?? []) as TrialRow[];
+  const income = byType(incomeRows, "income");
+  const expenses = byType(incomeRows, "expense");
   const totalIncome = round2(
     income.reduce((sum, row) => sum + Number(row.balance), 0),
   );
@@ -220,9 +268,21 @@ export default async function FinancialStatementsPage({
           }
         />
 
+        {/* Said plainly rather than left to be discovered: a property narrows
+            the income statement and nothing else. */}
+        {locationLabel ? (
+          <div className="mb-4">
+            <p className="text-sm">
+              Income statement shown for <strong>{locationLabel}</strong>. The
+              balance sheet, trial balance and cash flow stay company-wide —
+              cash, receivables and payables are not held per property.
+            </p>
+          </div>
+        ) : null}
+
         <div className="mb-5">
           <Card>
-            <form method="get" className="grid gap-3 sm:grid-cols-4 items-end">
+            <form method="get" className="grid gap-3 sm:grid-cols-5 items-end">
               <div>
                 <label className="label" htmlFor="statement">
                   Statement
@@ -238,6 +298,27 @@ export default async function FinancialStatementsPage({
                       {label}
                     </option>
                   ))}
+                </select>
+              </div>
+              <div>
+                <label className="label" htmlFor="location">
+                  Property
+                </label>
+                {/* Narrows the income statement only; the others cannot be
+                    split by property and say so below. */}
+                <select
+                  id="location"
+                  name="location"
+                  className="select"
+                  defaultValue={location ?? "all"}
+                >
+                  <option value="all">All properties</option>
+                  {(locations ?? []).map((row) => (
+                    <option key={row.id} value={row.id}>
+                      {row.code} — {row.name}
+                    </option>
+                  ))}
+                  <option value="unallocated">Unallocated</option>
                 </select>
               </div>
               <div>
@@ -278,7 +359,7 @@ export default async function FinancialStatementsPage({
         <div className="flex flex-col gap-5">
           {shows("income") ? (
           <Card
-            title="Income statement"
+            title={`Income statement${locationLabel ? ` — ${locationLabel}` : ""}`}
             description={`${formatDate(from)} to ${formatDate(to)}`}
             bodyClassName=""
           >

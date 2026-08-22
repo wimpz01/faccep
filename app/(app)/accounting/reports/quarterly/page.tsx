@@ -48,7 +48,7 @@ function quarterRange(year: number, quarter: number) {
 export default async function QuarterlyIncomePage({
   searchParams,
 }: {
-  searchParams: Promise<{ year?: string }>;
+  searchParams: Promise<{ year?: string; location?: string }>;
 }) {
   const filters = await searchParams;
   const context = await requirePermission(MODULE.reportsFinancials, "view");
@@ -59,18 +59,37 @@ export default async function QuarterlyIncomePage({
   const year =
     Number.isFinite(parsed) && parsed > 1990 && parsed < 2200 ? parsed : thisYear;
 
+  const location =
+    filters.location && filters.location !== "all" ? filters.location : null;
+
   const supabase = await createClient();
-  const quarters = await Promise.all(
-    QUARTERS.map(async (quarter) => {
-      const { from, to } = quarterRange(year, quarter);
-      const { data } = await supabase.rpc("trial_balance", {
-        p_company: companyId,
-        p_from: from,
-        p_to: to,
-      });
-      return { quarter, rows: (data ?? []) as TrialRow[] };
-    }),
-  );
+
+  /*
+   * Drawn from income_statement rather than trial_balance so the year can
+   * be read for one property. With none chosen it returns the same income
+   * and expense figures the trial balance does, so this page and the
+   * statements still agree.
+   */
+  const [quarters, { data: locations }] = await Promise.all([
+    Promise.all(
+      QUARTERS.map(async (quarter) => {
+        const { from, to } = quarterRange(year, quarter);
+        const { data } = await supabase.rpc("income_statement", {
+          p_company: companyId,
+          p_from: from,
+          p_to: to,
+          p_location: location,
+        });
+        return { quarter, rows: (data ?? []) as TrialRow[] };
+      }),
+    ),
+    supabase
+      .from("locations")
+      .select("id, code, name")
+      .eq("company_id", companyId)
+      .order("code")
+      .returns<{ id: string; code: string; name: string }[]>(),
+  ]);
 
   /*
    * One row per account, with a cell per quarter. Built from every quarter's
@@ -127,6 +146,15 @@ export default async function QuarterlyIncomePage({
 
   const years = [thisYear + 1, thisYear, thisYear - 1, thisYear - 2];
 
+  const locationLabel = !location
+    ? null
+    : location === "unallocated"
+      ? "Unallocated"
+      : (() => {
+          const place = (locations ?? []).find((row) => row.id === location);
+          return place ? `${place.code} — ${place.name}` : "Unknown property";
+        })();
+
   /** A row of figures across the four quarters, then the year. */
   function Figures({
     values,
@@ -161,7 +189,7 @@ export default async function QuarterlyIncomePage({
       <ReportMasthead
         companyName={context.activeCompany?.companyName}
         title="Income statement — quarterly comparison"
-        scopeNote={`Year ${year}`}
+        scopeNote={`Year ${year}${locationLabel ? ` · ${locationLabel}` : ""}`}
         showRange={false}
       />
 
@@ -198,6 +226,25 @@ export default async function QuarterlyIncomePage({
                 </select>
               </div>
               <div>
+                <label className="label" htmlFor="location">
+                  Property
+                </label>
+                <select
+                  id="location"
+                  name="location"
+                  className="select"
+                  defaultValue={location ?? "all"}
+                >
+                  <option value="all">All properties</option>
+                  {(locations ?? []).map((row) => (
+                    <option key={row.id} value={row.id}>
+                      {row.code} — {row.name}
+                    </option>
+                  ))}
+                  <option value="unallocated">Unallocated</option>
+                </select>
+              </div>
+              <div>
                 <button type="submit" className="btn btn-primary">
                   Apply
                 </button>
@@ -209,11 +256,14 @@ export default async function QuarterlyIncomePage({
 
       {!hasData ? (
         <Card>
-          <EmptyState>Nothing was posted to the ledger in {year}.</EmptyState>
+          <EmptyState>
+            Nothing was posted to the ledger in {year}
+            {locationLabel ? ` for ${locationLabel}` : ""}.
+          </EmptyState>
         </Card>
       ) : (
         <Card
-          title={`Income statement — ${year}`}
+          title={`Income statement — ${year}${locationLabel ? ` — ${locationLabel}` : ""}`}
           description="Each quarter as posted, and the year to date."
           bodyClassName=""
         >
