@@ -10,6 +10,8 @@ import { MODULE, can } from "@/lib/permissions";
 import { createClient } from "@/lib/supabase/server";
 
 import { saveMeterReadings, setPeriodLocked, updateUtilityPeriod } from "../actions";
+import { addHouseMeter, saveHouseReadings } from "../house-actions";
+import { HouseMeterGrid, type HouseMeterRow } from "../house-meter-grid";
 import { ProviderBillForm, ReadingGrid, type ReadingRow } from "../period-forms";
 
 export const metadata: Metadata = { title: "Utility period" };
@@ -129,6 +131,99 @@ export default async function UtilityPeriodPage({
     };
   });
 
+  /*
+   * The building's own meters for this property and utility, with anything
+   * already read this period. Every meter is listed whether read or not:
+   * one nobody has read is exactly what the balance needs to show.
+   */
+  const [{ data: houseMeters }, { data: houseReadings }] = await Promise.all([
+    supabase
+      .from("house_meters")
+      .select("id, label, serial, direction")
+      .eq("location_id", period.location_id)
+      .eq("utility", period.utility)
+      .eq("is_active", true)
+      .order("direction")
+      .order("label")
+      .returns<
+        {
+          id: string;
+          label: string;
+          serial: string | null;
+          direction: "consumption" | "supply";
+        }[]
+      >(),
+    supabase
+      .from("house_meter_readings")
+      .select("house_meter_id, previous_reading, present_reading")
+      .eq("period_id", period.id)
+      .returns<
+        {
+          house_meter_id: string;
+          previous_reading: string;
+          present_reading: string;
+        }[]
+      >(),
+  ]);
+
+  const houseSaved = new Map(
+    (houseReadings ?? []).map((row) => [row.house_meter_id, row]),
+  );
+
+  /*
+   * Last period's present reading becomes this one's previous, the same way
+   * a tenant's does. A meter is a running total on a dial: starting it from
+   * nought every month would read the whole life of the meter as one month's
+   * usage, and the balance would be nonsense the first time somebody forgot
+   * to type the previous figure by hand.
+   *
+   * Only for a meter not yet read this period. Once a reading is saved its
+   * own previous stands, so a correction typed here is not overwritten by
+   * history on the next visit.
+   */
+  const carriedForward = new Map<string, number>();
+  const houseMeterIds = (houseMeters ?? []).map((meter) => meter.id);
+
+  if (houseMeterIds.length > 0) {
+    const { data: houseHistory } = await supabase
+      .from("house_meter_readings")
+      .select(
+        "house_meter_id, present_reading, utility_periods!inner(period_start)",
+      )
+      .in("house_meter_id", houseMeterIds)
+      .lt("utility_periods.period_start", period.period_start)
+      .returns<
+        {
+          house_meter_id: string;
+          present_reading: string;
+          utility_periods: { period_start: string };
+        }[]
+      >();
+
+    for (const row of houseHistory ?? []) {
+      // Unordered per meter, so keep the highest seen -- a dial only climbs.
+      const seen = carriedForward.get(row.house_meter_id);
+      const value = Number(row.present_reading);
+      if (seen === undefined || value > seen) {
+        carriedForward.set(row.house_meter_id, value);
+      }
+    }
+  }
+
+  const houseRows: HouseMeterRow[] = (houseMeters ?? []).map((meter) => {
+    const saved = houseSaved.get(meter.id);
+    return {
+      id: meter.id,
+      label: meter.label,
+      serial: meter.serial,
+      direction: meter.direction,
+      previous: saved
+        ? Number(saved.previous_reading)
+        : (carriedForward.get(meter.id) ?? 0),
+      present: saved ? Number(saved.present_reading) : null,
+    };
+  });
+
   const tenantConsumption = (readings ?? []).reduce(
     (sum, row) => sum + Number(row.consumption ?? 0),
     0,
@@ -182,10 +277,11 @@ export default async function UtilityPeriodPage({
         </Card>
       </div>
 
-      <Card
-        title="Meter readings"
-        description={`${rows.length} unit${rows.length === 1 ? "" : "s"} in this location.`}
-      >
+      <div className="mb-6">
+        <Card
+          title="Meter readings"
+          description={`${rows.length} unit${rows.length === 1 ? "" : "s"} in this location.`}
+        >
         <ReadingGrid
           action={saveMeterReadings}
           periodId={period.id}
@@ -193,6 +289,27 @@ export default async function UtilityPeriodPage({
           rows={rows}
           rate={rate}
           extraExpense={Number(period.extra_expense)}
+          isLocked={period.is_locked}
+          canEdit={canEditReadings}
+        />
+        </Card>
+      </div>
+
+      {/* Where the provider's units actually went. Kept apart from the
+          tenant grid because none of it is charged to anybody. */}
+      <Card
+        title="Building meters and the balance"
+        description="The property's own meters, and what they leave unaccounted for against the provider bill."
+      >
+        <HouseMeterGrid
+          action={saveHouseReadings}
+          addAction={addHouseMeter}
+          periodId={period.id}
+          utility={period.utility}
+          meters={houseRows}
+          providerConsumption={Number(period.provider_consumption)}
+          tenantConsumption={tenantConsumption}
+          rate={rate}
           isLocked={period.is_locked}
           canEdit={canEditReadings}
         />
